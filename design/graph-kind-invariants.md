@@ -60,6 +60,42 @@ machine-readable `error.code` values (for example `graph_tree_cycle`,
   - `invalid_root_count`
   - `disconnected_tree`
 
+## Low-Cost Mutation Checks
+
+For preflight checks on single-edge edits, use an in-memory mutation index:
+
+- Precompute once per graph:
+  - node set
+  - edge set
+  - adjacency
+  - in-degree
+  - root set
+- Evaluate deltas without full write-path normalization:
+  - `would_add_edge_violations(from, to)`
+  - `would_remove_edge_violations(from, to)`
+  - `would_remove_edge_isolate_subgraph(from, to)`
+
+API surfaces:
+
+- `POST /graph/{graph_id}/validate/add-edge`
+- `POST /graph/{graph_id}/validate/remove-edge`
+
+Response includes:
+
+- `valid`
+- `wouldIntroduceViolation`
+- `wouldIsolateSubgraph`
+- `violations[]`
+
+## Performance Validation
+
+Add performance-oriented tests on synthetic random DAGs in the thousands-scale
+range to guard against regressions in single-mutation checks:
+
+- Current suite uses `3,000` nodes and `9,000` edges.
+- Runs repeated add/remove delta checks and asserts bounded runtime in debug
+  builds with generous thresholds.
+
 ## Auth
 
 - Existing auth model and scope checks remain unchanged.

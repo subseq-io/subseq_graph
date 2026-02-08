@@ -13,7 +13,8 @@ use subseq_auth::prelude::{AuthenticatedUser, ValidatesIdentity, structured_erro
 use crate::db;
 use crate::error::{ErrorKind, LibError};
 use crate::models::{
-    CreateGraphPayload, GraphId, GroupGraphPermissions, ListGraphsQuery, Paged, UpdateGraphPayload,
+    CreateGraphPayload, EdgeMutationCheckResponse, EdgeMutationPayload, GraphId,
+    GroupGraphPermissions, ListGraphsQuery, Paged, UpdateGraphPayload,
     UpdateGroupGraphPermissionsPayload, ValidateGraphEdgesPayload, ValidateGraphEdgesResponse,
 };
 use crate::permissions;
@@ -215,17 +216,81 @@ where
     }))
 }
 
+async fn validate_add_edge_handler<S>(
+    State(app): State<S>,
+    auth_user: AuthenticatedUser,
+    Path(graph_id): Path<GraphId>,
+    Json(payload): Json<EdgeMutationPayload>,
+) -> Result<impl IntoResponse, AppError>
+where
+    S: GraphApp + Clone + Send + Sync + 'static,
+{
+    let graph = db::get_graph(
+        &app.pool(),
+        auth_user.id(),
+        graph_id,
+        permissions::graph_update_access_roles(),
+    )
+    .await?;
+    let index = crate::invariants::GraphMutationIndex::new(graph.kind, &graph.nodes, &graph.edges);
+    let violations = index.would_add_edge_violations(payload.from_node_id, payload.to_node_id);
+    Ok(Json(EdgeMutationCheckResponse {
+        valid: violations.is_empty(),
+        would_introduce_violation: !violations.is_empty(),
+        would_isolate_subgraph: false,
+        violations,
+    }))
+}
+
+async fn validate_remove_edge_handler<S>(
+    State(app): State<S>,
+    auth_user: AuthenticatedUser,
+    Path(graph_id): Path<GraphId>,
+    Json(payload): Json<EdgeMutationPayload>,
+) -> Result<impl IntoResponse, AppError>
+where
+    S: GraphApp + Clone + Send + Sync + 'static,
+{
+    let graph = db::get_graph(
+        &app.pool(),
+        auth_user.id(),
+        graph_id,
+        permissions::graph_update_access_roles(),
+    )
+    .await?;
+    let index = crate::invariants::GraphMutationIndex::new(graph.kind, &graph.nodes, &graph.edges);
+    let violations = index.would_remove_edge_violations(payload.from_node_id, payload.to_node_id);
+    let would_isolate_subgraph =
+        index.would_remove_edge_isolate_subgraph(payload.from_node_id, payload.to_node_id);
+    Ok(Json(EdgeMutationCheckResponse {
+        valid: violations.is_empty(),
+        would_introduce_violation: !violations.is_empty(),
+        would_isolate_subgraph,
+        violations,
+    }))
+}
+
 pub fn routes<S>() -> Router<S>
 where
     S: GraphApp + Clone + Send + Sync + 'static,
 {
     tracing::info!("Registering route /graph [GET,POST]");
     tracing::info!("Registering route /graph/validate [POST]");
+    tracing::info!("Registering route /graph/{{graph_id}}/validate/add-edge [POST]");
+    tracing::info!("Registering route /graph/{{graph_id}}/validate/remove-edge [POST]");
     tracing::info!("Registering route /graph/{{graph_id}} [GET,PUT,DELETE]");
     tracing::info!("Registering route /graph/group/{{group_id}}/permissions [GET,PUT]");
 
     Router::new()
         .route("/graph/validate", post(validate_graph_edges_handler::<S>))
+        .route(
+            "/graph/{graph_id}/validate/add-edge",
+            post(validate_add_edge_handler::<S>),
+        )
+        .route(
+            "/graph/{graph_id}/validate/remove-edge",
+            post(validate_remove_edge_handler::<S>),
+        )
         .route(
             "/graph",
             get(list_graphs_handler::<S>).post(create_graph_handler::<S>),

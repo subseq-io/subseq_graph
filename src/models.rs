@@ -200,6 +200,22 @@ pub struct ValidateGraphEdgesResponse {
     pub violations: Vec<GraphInvariantViolation>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeMutationPayload {
+    pub from_node_id: GraphNodeId,
+    pub to_node_id: GraphNodeId,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeMutationCheckResponse {
+    pub valid: bool,
+    pub would_introduce_violation: bool,
+    pub would_isolate_subgraph: bool,
+    pub violations: Vec<GraphInvariantViolation>,
+}
+
 #[derive(Debug, Clone)]
 pub struct GraphInvariantInput {
     pub kind: GraphKind,

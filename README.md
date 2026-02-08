@@ -174,6 +174,40 @@ Request body:
 }
 ```
 
+Low-cost single-mutation checks:
+
+- `POST /graph/{graph_id}/validate/add-edge`
+- `POST /graph/{graph_id}/validate/remove-edge`
+
+These use an in-memory mutation index to precompute node/edge topology once, then
+evaluate single-edge deltas with targeted checks (for cycle/isolation) instead of
+re-running full normalization/write paths.
+
+Request body:
+
+```json
+{
+  "fromNodeId": "uuid",
+  "toNodeId": "uuid"
+}
+```
+
+Response body:
+
+```json
+{
+  "valid": false,
+  "wouldIntroduceViolation": true,
+  "wouldIsolateSubgraph": true,
+  "violations": [
+    {
+      "type": "invalid_root_count",
+      "root_count": 2
+    }
+  ]
+}
+```
+
 Response body:
 
 ```json

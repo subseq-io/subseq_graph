@@ -5,6 +5,299 @@ use anyhow::anyhow;
 use crate::error::{LibError, Result};
 use crate::models::{GraphEdge, GraphInvariantViolation, GraphKind, GraphNode, GraphNodeId};
 
+#[derive(Debug, Clone)]
+pub struct GraphMutationIndex {
+    kind: GraphKind,
+    node_ids: HashSet<GraphNodeId>,
+    adjacency: HashMap<GraphNodeId, Vec<GraphNodeId>>,
+    indegree: HashMap<GraphNodeId, usize>,
+    roots: HashSet<GraphNodeId>,
+    edge_set: HashSet<(GraphNodeId, GraphNodeId)>,
+}
+
+impl GraphMutationIndex {
+    pub fn new(kind: GraphKind, nodes: &[GraphNode], edges: &[GraphEdge]) -> Self {
+        let node_ids: HashSet<GraphNodeId> = nodes.iter().map(|node| node.id).collect();
+        let mut adjacency: HashMap<GraphNodeId, Vec<GraphNodeId>> =
+            HashMap::with_capacity(nodes.len());
+        let mut indegree: HashMap<GraphNodeId, usize> = HashMap::with_capacity(nodes.len());
+        for node in nodes {
+            adjacency.insert(node.id, Vec::new());
+            indegree.insert(node.id, 0);
+        }
+
+        let mut edge_set = HashSet::with_capacity(edges.len());
+        for edge in edges {
+            if !node_ids.contains(&edge.from_node_id) || !node_ids.contains(&edge.to_node_id) {
+                continue;
+            }
+            if edge_set.insert((edge.from_node_id, edge.to_node_id)) {
+                adjacency
+                    .get_mut(&edge.from_node_id)
+                    .expect("node should exist")
+                    .push(edge.to_node_id);
+                *indegree
+                    .get_mut(&edge.to_node_id)
+                    .expect("node should exist") += 1;
+            }
+        }
+
+        let roots = indegree
+            .iter()
+            .filter_map(|(node_id, degree)| if *degree == 0 { Some(*node_id) } else { None })
+            .collect::<HashSet<_>>();
+
+        Self {
+            kind,
+            node_ids,
+            adjacency,
+            indegree,
+            roots,
+            edge_set,
+        }
+    }
+
+    pub fn would_add_edge_violations(
+        &self,
+        from_node_id: GraphNodeId,
+        to_node_id: GraphNodeId,
+    ) -> Vec<GraphInvariantViolation> {
+        let mut violations = Vec::new();
+        if !self.node_ids.contains(&from_node_id) {
+            violations.push(GraphInvariantViolation::UnknownNodeReference {
+                from_node_id,
+                to_node_id,
+                missing_node_id: from_node_id,
+            });
+        }
+        if !self.node_ids.contains(&to_node_id) {
+            violations.push(GraphInvariantViolation::UnknownNodeReference {
+                from_node_id,
+                to_node_id,
+                missing_node_id: to_node_id,
+            });
+        }
+        if !violations.is_empty() || self.edge_set.contains(&(from_node_id, to_node_id)) {
+            return violations;
+        }
+
+        if matches!(self.kind, GraphKind::Tree | GraphKind::Dag) && from_node_id == to_node_id {
+            violations.push(GraphInvariantViolation::SelfLoop {
+                node_id: from_node_id,
+            });
+        }
+
+        if self.kind == GraphKind::Tree {
+            let next_indegree = self
+                .indegree
+                .get(&to_node_id)
+                .copied()
+                .expect("to node should exist")
+                + 1;
+            if next_indegree > 1 {
+                violations.push(GraphInvariantViolation::InDegreeExceeded {
+                    node_id: to_node_id,
+                    in_degree: next_indegree,
+                });
+            }
+        }
+
+        if matches!(self.kind, GraphKind::Tree | GraphKind::Dag)
+            && self.path_exists(
+                to_node_id,
+                from_node_id,
+                Some((from_node_id, to_node_id)),
+                None,
+            )
+        {
+            violations.push(GraphInvariantViolation::CycleDetected);
+        }
+
+        if self.kind == GraphKind::Tree {
+            let mut roots_after = self.roots.clone();
+            if self.indegree.get(&to_node_id).copied().unwrap_or(0) == 0 {
+                roots_after.remove(&to_node_id);
+            }
+
+            if roots_after.len() != 1 {
+                violations.push(GraphInvariantViolation::InvalidRootCount {
+                    root_count: roots_after.len(),
+                });
+                return violations;
+            }
+
+            let root = roots_after
+                .iter()
+                .next()
+                .copied()
+                .expect("single-root set should have one root");
+            let reachable = self.reachable_nodes(root, Some((from_node_id, to_node_id)), None);
+            if reachable.len() != self.node_ids.len() {
+                let mut unreachable = self
+                    .node_ids
+                    .iter()
+                    .filter(|node_id| !reachable.contains(node_id))
+                    .copied()
+                    .collect::<Vec<_>>();
+                unreachable.sort_by_key(|node_id| node_id.0);
+                violations.push(GraphInvariantViolation::DisconnectedTree {
+                    unreachable_node_ids: unreachable,
+                });
+            }
+        }
+
+        violations
+    }
+
+    pub fn would_remove_edge_violations(
+        &self,
+        from_node_id: GraphNodeId,
+        to_node_id: GraphNodeId,
+    ) -> Vec<GraphInvariantViolation> {
+        if !self.edge_set.contains(&(from_node_id, to_node_id)) {
+            return Vec::new();
+        }
+
+        let mut violations = Vec::new();
+        if self.kind != GraphKind::Tree {
+            return violations;
+        }
+
+        let mut roots_after = self.roots.clone();
+        let current_indegree = self.indegree.get(&to_node_id).copied().unwrap_or(0);
+        if current_indegree == 1 {
+            roots_after.insert(to_node_id);
+        }
+
+        if roots_after.len() != 1 {
+            violations.push(GraphInvariantViolation::InvalidRootCount {
+                root_count: roots_after.len(),
+            });
+        } else {
+            let root = roots_after
+                .iter()
+                .next()
+                .copied()
+                .expect("single-root set should have one root");
+            let reachable = self.reachable_nodes(root, None, Some((from_node_id, to_node_id)));
+            if reachable.len() != self.node_ids.len() {
+                let mut unreachable = self
+                    .node_ids
+                    .iter()
+                    .filter(|node_id| !reachable.contains(node_id))
+                    .copied()
+                    .collect::<Vec<_>>();
+                unreachable.sort_by_key(|node_id| node_id.0);
+                violations.push(GraphInvariantViolation::DisconnectedTree {
+                    unreachable_node_ids: unreachable,
+                });
+            }
+        }
+
+        violations
+    }
+
+    pub fn would_remove_edge_isolate_subgraph(
+        &self,
+        from_node_id: GraphNodeId,
+        to_node_id: GraphNodeId,
+    ) -> bool {
+        if !self.edge_set.contains(&(from_node_id, to_node_id)) {
+            return false;
+        }
+        if self.node_ids.len() <= 1 {
+            return false;
+        }
+
+        let root = if let Some(root) = self.roots.iter().next().copied() {
+            root
+        } else {
+            return false;
+        };
+        let reachable = self.reachable_nodes(root, None, Some((from_node_id, to_node_id)));
+        reachable.len() != self.node_ids.len()
+    }
+
+    fn path_exists(
+        &self,
+        start: GraphNodeId,
+        target: GraphNodeId,
+        virtual_add: Option<(GraphNodeId, GraphNodeId)>,
+        virtual_remove: Option<(GraphNodeId, GraphNodeId)>,
+    ) -> bool {
+        if start == target {
+            return true;
+        }
+        if !self.node_ids.contains(&start) || !self.node_ids.contains(&target) {
+            return false;
+        }
+
+        let mut seen = HashSet::new();
+        let mut queue = VecDeque::new();
+        seen.insert(start);
+        queue.push_back(start);
+
+        while let Some(node_id) = queue.pop_front() {
+            let mut neighbors = self.adjacency.get(&node_id).cloned().unwrap_or_default();
+            if let Some((from, to)) = virtual_add {
+                if from == node_id && !neighbors.contains(&to) {
+                    neighbors.push(to);
+                }
+            }
+
+            for next in neighbors {
+                if let Some((remove_from, remove_to)) = virtual_remove {
+                    if remove_from == node_id && remove_to == next {
+                        continue;
+                    }
+                }
+                if next == target {
+                    return true;
+                }
+                if seen.insert(next) {
+                    queue.push_back(next);
+                }
+            }
+        }
+
+        false
+    }
+
+    fn reachable_nodes(
+        &self,
+        root: GraphNodeId,
+        virtual_add: Option<(GraphNodeId, GraphNodeId)>,
+        virtual_remove: Option<(GraphNodeId, GraphNodeId)>,
+    ) -> HashSet<GraphNodeId> {
+        let mut seen = HashSet::new();
+        let mut queue = VecDeque::new();
+        seen.insert(root);
+        queue.push_back(root);
+
+        while let Some(node_id) = queue.pop_front() {
+            let mut neighbors = self.adjacency.get(&node_id).cloned().unwrap_or_default();
+            if let Some((from, to)) = virtual_add {
+                if from == node_id && !neighbors.contains(&to) {
+                    neighbors.push(to);
+                }
+            }
+
+            for next in neighbors {
+                if let Some((remove_from, remove_to)) = virtual_remove {
+                    if remove_from == node_id && remove_to == next {
+                        continue;
+                    }
+                }
+                if seen.insert(next) {
+                    queue.push_back(next);
+                }
+            }
+        }
+
+        seen
+    }
+}
+
 pub fn graph_invariant_violations(
     kind: GraphKind,
     nodes: &[GraphNode],
@@ -180,6 +473,9 @@ fn reachable_nodes(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::time::{Duration, Instant};
+
     use serde_json::json;
     use uuid::Uuid;
 
@@ -340,5 +636,120 @@ mod tests {
                 missing_node_id
             } if *from_node_id == a && *to_node_id == missing && *missing_node_id == missing
         ));
+    }
+
+    #[test]
+    fn add_edge_delta_check_reports_cycle_for_dag() {
+        let a = GraphNodeId(Uuid::new_v4());
+        let b = GraphNodeId(Uuid::new_v4());
+        let c = GraphNodeId(Uuid::new_v4());
+        let nodes = vec![node(a, "A"), node(b, "B"), node(c, "C")];
+        let edges = vec![edge(a, b), edge(b, c)];
+        let index = GraphMutationIndex::new(GraphKind::Dag, &nodes, &edges);
+
+        let violations = index.would_add_edge_violations(c, a);
+        assert!(
+            violations
+                .iter()
+                .any(|v| matches!(v, GraphInvariantViolation::CycleDetected))
+        );
+    }
+
+    #[test]
+    fn add_edge_delta_check_allows_cycle_for_directed() {
+        let a = GraphNodeId(Uuid::new_v4());
+        let b = GraphNodeId(Uuid::new_v4());
+        let nodes = vec![node(a, "A"), node(b, "B")];
+        let edges = vec![edge(a, b)];
+        let index = GraphMutationIndex::new(GraphKind::Directed, &nodes, &edges);
+
+        let violations = index.would_add_edge_violations(b, a);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn remove_edge_delta_check_reports_tree_isolation() {
+        let root = GraphNodeId(Uuid::new_v4());
+        let child = GraphNodeId(Uuid::new_v4());
+        let leaf = GraphNodeId(Uuid::new_v4());
+        let nodes = vec![node(root, "root"), node(child, "child"), node(leaf, "leaf")];
+        let edges = vec![edge(root, child), edge(child, leaf)];
+        let index = GraphMutationIndex::new(GraphKind::Tree, &nodes, &edges);
+
+        let violations = index.would_remove_edge_violations(root, child);
+        assert!(violations.iter().any(|v| matches!(
+            v,
+            GraphInvariantViolation::InvalidRootCount { .. }
+        ) || matches!(
+            v,
+            GraphInvariantViolation::DisconnectedTree { .. }
+        )));
+        assert!(index.would_remove_edge_isolate_subgraph(root, child));
+    }
+
+    fn lcg_next(state: &mut u64) -> u64 {
+        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        *state
+    }
+
+    fn synthetic_dag(node_count: usize, edge_count: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
+        let nodes = (0..node_count)
+            .map(|idx| {
+                let id = GraphNodeId(Uuid::from_u128((idx as u128) + 1));
+                node(id, "N")
+            })
+            .collect::<Vec<_>>();
+        let ids = nodes.iter().map(|n| n.id).collect::<Vec<_>>();
+
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut seen = HashSet::with_capacity(edge_count);
+        let mut edges = Vec::with_capacity(edge_count);
+        while edges.len() < edge_count {
+            let a = (lcg_next(&mut state) as usize) % node_count;
+            let b = (lcg_next(&mut state) as usize) % node_count;
+            if a == b {
+                continue;
+            }
+            let (from, to) = if a < b { (a, b) } else { (b, a) };
+            let pair = (ids[from], ids[to]);
+            if seen.insert(pair) {
+                edges.push(edge(pair.0, pair.1));
+            }
+        }
+
+        (nodes, edges)
+    }
+
+    #[test]
+    fn mutation_delta_checks_perform_well_on_thousand_scale_graphs() {
+        let (nodes, edges) = synthetic_dag(3_000, 9_000);
+        let ids = nodes.iter().map(|n| n.id).collect::<Vec<_>>();
+        let index = GraphMutationIndex::new(GraphKind::Dag, &nodes, &edges);
+
+        let start_add = Instant::now();
+        for idx in 0..2_000usize {
+            let from = ids[(idx * 31) % ids.len()];
+            let to = ids[(idx * 17 + 13) % ids.len()];
+            let _ = index.would_add_edge_violations(from, to);
+        }
+        let add_elapsed = start_add.elapsed();
+
+        let start_remove = Instant::now();
+        for edge in edges.iter().take(2_000) {
+            let _ = index.would_remove_edge_violations(edge.from_node_id, edge.to_node_id);
+        }
+        let remove_elapsed = start_remove.elapsed();
+
+        // Generous guardrail for debug builds; this is intended to catch algorithmic regressions.
+        assert!(
+            add_elapsed < Duration::from_secs(5),
+            "add-edge delta checks were too slow: {:?}",
+            add_elapsed
+        );
+        assert!(
+            remove_elapsed < Duration::from_secs(5),
+            "remove-edge delta checks were too slow: {:?}",
+            remove_elapsed
+        );
     }
 }
