@@ -23,9 +23,11 @@ pub mod prelude {
         UpdateGraphPayload, UpdateGroupGraphPermissionsPayload,
     };
     pub use crate::permissions::{
-        all_graph_permission_roles, graph_create_role, graph_delete_role,
-        graph_permissions_read_role, graph_permissions_update_role, graph_read_role,
-        graph_role_scope, graph_role_scope_id_for_group, graph_role_scope_id_global,
+        all_graph_permission_roles, graph_create_access_roles, graph_create_role,
+        graph_delete_access_roles, graph_delete_role, graph_permissions_read_access_roles,
+        graph_permissions_read_role, graph_permissions_update_access_roles,
+        graph_permissions_update_role, graph_read_access_roles, graph_read_role, graph_role_scope,
+        graph_role_scope_id_for_group, graph_role_scope_id_global, graph_update_access_roles,
         graph_update_role,
     };
     pub use subseq_auth::group_id::GroupId;

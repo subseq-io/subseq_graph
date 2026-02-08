@@ -60,7 +60,7 @@ where
         &app.pool(),
         auth_user.id(),
         payload,
-        permissions::graph_create_role(),
+        permissions::graph_create_access_roles(),
     )
     .await?;
     Ok((StatusCode::CREATED, Json(graph)))
@@ -80,7 +80,7 @@ where
         auth_user.id(),
         page,
         limit,
-        permissions::graph_read_role(),
+        permissions::graph_read_access_roles(),
     )
     .await?;
     Ok(Json(Paged {
@@ -102,7 +102,7 @@ where
         &app.pool(),
         auth_user.id(),
         graph_id,
-        permissions::graph_read_role(),
+        permissions::graph_read_access_roles(),
     )
     .await?;
     Ok(Json(graph))
@@ -122,7 +122,7 @@ where
         auth_user.id(),
         graph_id,
         payload,
-        permissions::graph_update_role(),
+        permissions::graph_update_access_roles(),
     )
     .await?;
     Ok(Json(graph))
@@ -140,7 +140,7 @@ where
         &app.pool(),
         auth_user.id(),
         graph_id,
-        permissions::graph_delete_role(),
+        permissions::graph_delete_access_roles(),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -158,7 +158,7 @@ where
         &app.pool(),
         auth_user.id(),
         group_id,
-        permissions::graph_permissions_read_role(),
+        permissions::graph_permissions_read_access_roles(),
         "You do not have permission to view graph permissions for this group",
     )
     .await?;
@@ -183,7 +183,7 @@ where
         &app.pool(),
         auth_user.id(),
         group_id,
-        permissions::graph_permissions_update_role(),
+        permissions::graph_permissions_update_access_roles(),
         "You do not have permission to manage graph permissions for this group",
     )
     .await?;

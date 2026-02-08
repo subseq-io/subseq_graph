@@ -23,6 +23,11 @@ The graph library uses fixed permission role names:
 - `graph_permissions_read`
 - `graph_permissions_update`
 
+Read inheritance:
+
+- Graph read/list checks accept any of: `graph_read`, `graph_create`, `graph_update`, `graph_delete`.
+- Graph-permission read checks accept `graph_permissions_read` or `graph_permissions_update`.
+
 These are exposed via `subseq_graph::permissions` helpers so app code can avoid string literals.
 
 ```rust
@@ -32,6 +37,7 @@ let scope = permissions::graph_role_scope(); // "graph"
 let global_scope_id = permissions::graph_role_scope_id_global(); // "global"
 let update_role = permissions::graph_update_role(); // "graph_update"
 let all_graph_roles = permissions::all_graph_permission_roles();
+let graph_read_access = permissions::graph_read_access_roles();
 ```
 
 ### Scope IDs
@@ -40,11 +46,17 @@ For group-scoped graph permissions:
 
 - `scope = "graph"`
 - `scope_id = group_id.to_string()`
+- Applies to:
+  - `auth.group_roles` grants for that specific group.
+  - `auth.user_roles` direct user grants for that specific group.
 
 For global graph permissions:
 
 - `scope = "graph"`
 - `scope_id = "global"`
+- Applies to:
+  - `auth.user_roles` direct user grants.
+  - Not used for `auth.group_roles` in graph authorization checks.
 
 ### Group Permission Route Behavior
 

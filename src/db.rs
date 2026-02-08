@@ -136,31 +136,33 @@ async fn graph_exists(pool: &PgPool, graph_id: GraphId) -> Result<bool> {
     Ok(exists.0)
 }
 
-fn normalized_required_role(required_role: &str) -> Option<String> {
-    let role = required_role.trim();
-    if role.is_empty() {
-        None
-    } else {
-        Some(role.to_string())
-    }
-}
+fn normalize_required_roles(required_roles: &[&str]) -> Result<Vec<String>> {
+    let mut dedupe = HashSet::new();
+    let roles: Vec<String> = required_roles
+        .iter()
+        .map(|role| role.trim())
+        .filter(|role| !role.is_empty())
+        .filter(|role| dedupe.insert((*role).to_string()))
+        .map(ToString::to_string)
+        .collect();
 
-fn require_configured_role(required_role: &str) -> Result<String> {
-    normalized_required_role(required_role).ok_or_else(|| {
-        LibError::forbidden(
+    if roles.is_empty() {
+        return Err(LibError::forbidden(
             "Graph permissions are not configured",
-            anyhow!("required graph role was empty"),
-        )
-    })
+            anyhow!("required graph role set was empty"),
+        ));
+    }
+
+    Ok(roles)
 }
 
 async fn user_has_group_permission_role(
     pool: &PgPool,
     actor: UserId,
     group_id: GroupId,
-    required_role: &str,
+    required_roles: &[&str],
 ) -> Result<bool> {
-    let required_role = require_configured_role(required_role)?;
+    let required_roles = normalize_required_roles(required_roles)?;
     let group_scope_id = permissions::graph_role_scope_id_for_group(group_id);
 
     let has_role: (bool,) = sqlx::query_as(
@@ -183,15 +185,15 @@ async fn user_has_group_permission_role(
                       WHERE ur.user_id = gm.user_id
                         AND ur.scope = $3
                         AND ur.scope_id IN ($4, $5)
-                        AND ur.role_name = $6
+                        AND ur.role_name = ANY($6)
                   )
                   OR EXISTS (
                       SELECT 1
                       FROM auth.group_roles gr
                       WHERE gr.group_id = gm.group_id
                         AND gr.scope = $3
-                        AND gr.scope_id IN ($4, $5)
-                        AND gr.role_name = $6
+                        AND gr.scope_id = gm.group_id::text
+                        AND gr.role_name = ANY($6)
                   )
               )
         )
@@ -202,7 +204,7 @@ async fn user_has_group_permission_role(
     .bind(permissions::graph_role_scope())
     .bind(group_scope_id)
     .bind(permissions::graph_role_scope_id_global())
-    .bind(required_role)
+    .bind(required_roles)
     .fetch_one(pool)
     .await
     .map_err(|err| db_err("Failed to query group permissions", err))?;
@@ -214,7 +216,7 @@ async fn ensure_group_permission(
     pool: &PgPool,
     actor: UserId,
     group_id: GroupId,
-    required_role: &str,
+    required_roles: &[&str],
     denied_message: &'static str,
 ) -> Result<()> {
     if !group_exists(pool, group_id).await? {
@@ -224,15 +226,15 @@ async fn ensure_group_permission(
         ));
     }
 
-    if user_has_group_permission_role(pool, actor, group_id, required_role).await? {
+    if user_has_group_permission_role(pool, actor, group_id, required_roles).await? {
         Ok(())
     } else {
         Err(LibError::forbidden(
             denied_message,
             anyhow!(
-                "user {} lacks graph role {} for group {}",
+                "user {} lacks required graph roles ({}) for group {}",
                 actor,
-                required_role,
+                required_roles.join(", "),
                 group_id
             ),
         ))
@@ -243,9 +245,9 @@ async fn load_accessible_graph(
     pool: &PgPool,
     actor: UserId,
     graph_id: GraphId,
-    group_required_role: &str,
+    group_required_roles: &[&str],
 ) -> Result<GraphRow> {
-    let normalized_role = normalized_required_role(group_required_role);
+    let normalized_roles = normalize_required_roles(group_required_roles)?;
 
     let row = sqlx::query_as::<_, GraphRow>(
         r#"
@@ -264,7 +266,6 @@ async fn load_accessible_graph(
               (g.owner_group_id IS NULL AND g.owner_user_id = $2)
               OR (
                   g.owner_group_id IS NOT NULL
-                  AND $5::text IS NOT NULL
                   AND EXISTS (
                       SELECT 1
                       FROM auth.group_memberships gm
@@ -283,15 +284,15 @@ async fn load_accessible_graph(
                                 WHERE ur.user_id = gm.user_id
                                   AND ur.scope = $3
                                   AND ur.scope_id IN (gm.group_id::text, $4)
-                                  AND ur.role_name = $5
+                                  AND ur.role_name = ANY($5)
                             )
                             OR EXISTS (
                                 SELECT 1
                                 FROM auth.group_roles gr
                                 WHERE gr.group_id = gm.group_id
                                   AND gr.scope = $3
-                                  AND gr.scope_id IN (gm.group_id::text, $4)
-                                  AND gr.role_name = $5
+                                  AND gr.scope_id = gm.group_id::text
+                                  AND gr.role_name = ANY($5)
                             )
                         )
                   )
@@ -304,7 +305,7 @@ async fn load_accessible_graph(
     .bind(actor.0)
     .bind(permissions::graph_role_scope())
     .bind(permissions::graph_role_scope_id_global())
-    .bind(normalized_role)
+    .bind(normalized_roles)
     .fetch_optional(pool)
     .await
     .map_err(|err| db_err("Failed to query graph", err))?;
@@ -368,7 +369,7 @@ pub async fn create_graph(
     pool: &PgPool,
     actor: UserId,
     payload: CreateGraphPayload,
-    group_create_role: &str,
+    group_create_roles: &[&str],
 ) -> Result<DirectedGraph> {
     let definition = payload.normalize()?;
     if let Some(group_id) = definition.owner_group_id {
@@ -376,7 +377,7 @@ pub async fn create_graph(
             pool,
             actor,
             group_id,
-            group_create_role,
+            group_create_roles,
             "You do not have permission to create graphs for this group",
         )
         .await?;
@@ -419,16 +420,16 @@ pub async fn create_graph(
         .await
         .map_err(|err| db_err("Failed to commit transaction", err))?;
 
-    get_graph(pool, actor, graph_id, group_create_role).await
+    get_graph(pool, actor, graph_id, group_create_roles).await
 }
 
 pub async fn get_graph(
     pool: &PgPool,
     actor: UserId,
     graph_id: GraphId,
-    group_read_role: &str,
+    group_read_roles: &[&str],
 ) -> Result<DirectedGraph> {
-    let graph = load_accessible_graph(pool, actor, graph_id, group_read_role).await?;
+    let graph = load_accessible_graph(pool, actor, graph_id, group_read_roles).await?;
     let nodes = sqlx::query_as::<_, GraphNodeRow>(
         r#"
         SELECT id, label, metadata
@@ -463,10 +464,10 @@ pub async fn list_graphs(
     actor: UserId,
     page: u32,
     limit: u32,
-    group_read_role: &str,
+    group_read_roles: &[&str],
 ) -> Result<Vec<GraphSummary>> {
     let offset = (page.saturating_sub(1) as i64).saturating_mul(limit as i64);
-    let normalized_role = normalized_required_role(group_read_role);
+    let normalized_roles = normalize_required_roles(group_read_roles)?;
 
     let rows = sqlx::query_as::<_, GraphSummaryRow>(
         r#"
@@ -497,7 +498,6 @@ pub async fn list_graphs(
             (g.owner_group_id IS NULL AND g.owner_user_id = $1)
             OR (
                 g.owner_group_id IS NOT NULL
-                AND $4::text IS NOT NULL
                 AND EXISTS (
                     SELECT 1
                     FROM auth.group_memberships gm
@@ -516,15 +516,15 @@ pub async fn list_graphs(
                               WHERE ur.user_id = gm.user_id
                                 AND ur.scope = $5
                                 AND ur.scope_id IN (gm.group_id::text, $6)
-                                AND ur.role_name = $4
+                                AND ur.role_name = ANY($4)
                           )
                           OR EXISTS (
                               SELECT 1
                               FROM auth.group_roles gr
                               WHERE gr.group_id = gm.group_id
                                 AND gr.scope = $5
-                                AND gr.scope_id IN (gm.group_id::text, $6)
-                                AND gr.role_name = $4
+                                AND gr.scope_id = gm.group_id::text
+                                AND gr.role_name = ANY($4)
                           )
                       )
                 )
@@ -537,7 +537,7 @@ pub async fn list_graphs(
     .bind(actor.0)
     .bind(limit as i64)
     .bind(offset)
-    .bind(normalized_role)
+    .bind(normalized_roles)
     .bind(permissions::graph_role_scope())
     .bind(permissions::graph_role_scope_id_global())
     .fetch_all(pool)
@@ -552,7 +552,7 @@ pub async fn update_graph(
     actor: UserId,
     graph_id: GraphId,
     payload: UpdateGraphPayload,
-    group_update_role: &str,
+    group_update_roles: &[&str],
 ) -> Result<DirectedGraph> {
     let definition = payload.normalize()?;
 
@@ -561,12 +561,12 @@ pub async fn update_graph(
             pool,
             actor,
             group_id,
-            group_update_role,
+            group_update_roles,
             "You do not have permission to update graphs for this group",
         )
         .await?;
     }
-    let normalized_role = normalized_required_role(group_update_role);
+    let normalized_roles = normalize_required_roles(group_update_roles)?;
 
     let mut tx = pool
         .begin()
@@ -586,7 +586,6 @@ pub async fn update_graph(
               (owner_group_id IS NULL AND owner_user_id = $6)
               OR (
                   owner_group_id IS NOT NULL
-                  AND $7::text IS NOT NULL
                   AND EXISTS (
                       SELECT 1
                       FROM auth.group_memberships gm
@@ -605,15 +604,15 @@ pub async fn update_graph(
                                 WHERE ur.user_id = gm.user_id
                                   AND ur.scope = $8
                                   AND ur.scope_id IN (gm.group_id::text, $9)
-                                  AND ur.role_name = $7
+                                  AND ur.role_name = ANY($7)
                             )
                             OR EXISTS (
                                 SELECT 1
                                 FROM auth.group_roles gr
                                 WHERE gr.group_id = gm.group_id
                                   AND gr.scope = $8
-                                  AND gr.scope_id IN (gm.group_id::text, $9)
-                                  AND gr.role_name = $7
+                                  AND gr.scope_id = gm.group_id::text
+                                  AND gr.role_name = ANY($7)
                             )
                         )
                   )
@@ -627,7 +626,7 @@ pub async fn update_graph(
     .bind(&definition.metadata)
     .bind(graph_id.0)
     .bind(actor.0)
-    .bind(normalized_role)
+    .bind(normalized_roles)
     .bind(permissions::graph_role_scope())
     .bind(permissions::graph_role_scope_id_global())
     .execute(&mut *tx)
@@ -680,16 +679,16 @@ pub async fn update_graph(
         .await
         .map_err(|err| db_err("Failed to commit transaction", err))?;
 
-    get_graph(pool, actor, graph_id, group_update_role).await
+    get_graph(pool, actor, graph_id, group_update_roles).await
 }
 
 pub async fn delete_graph(
     pool: &PgPool,
     actor: UserId,
     graph_id: GraphId,
-    group_delete_role: &str,
+    group_delete_roles: &[&str],
 ) -> Result<()> {
-    let normalized_role = normalized_required_role(group_delete_role);
+    let normalized_roles = normalize_required_roles(group_delete_roles)?;
 
     let deleted = sqlx::query(
         r#"
@@ -699,7 +698,6 @@ pub async fn delete_graph(
               (owner_group_id IS NULL AND owner_user_id = $2)
               OR (
                   owner_group_id IS NOT NULL
-                  AND $3::text IS NOT NULL
                   AND EXISTS (
                       SELECT 1
                       FROM auth.group_memberships gm
@@ -718,15 +716,15 @@ pub async fn delete_graph(
                                 WHERE ur.user_id = gm.user_id
                                   AND ur.scope = $4
                                   AND ur.scope_id IN (gm.group_id::text, $5)
-                                  AND ur.role_name = $3
+                                  AND ur.role_name = ANY($3)
                             )
                             OR EXISTS (
                                 SELECT 1
                                 FROM auth.group_roles gr
                                 WHERE gr.group_id = gm.group_id
                                   AND gr.scope = $4
-                                  AND gr.scope_id IN (gm.group_id::text, $5)
-                                  AND gr.role_name = $3
+                                  AND gr.scope_id = gm.group_id::text
+                                  AND gr.role_name = ANY($3)
                             )
                         )
                   )
@@ -736,7 +734,7 @@ pub async fn delete_graph(
     )
     .bind(graph_id.0)
     .bind(actor.0)
-    .bind(normalized_role)
+    .bind(normalized_roles)
     .bind(permissions::graph_role_scope())
     .bind(permissions::graph_role_scope_id_global())
     .execute(pool)
@@ -816,10 +814,10 @@ pub async fn authorize_group_permission(
     pool: &PgPool,
     actor: UserId,
     group_id: GroupId,
-    required_role: &str,
+    required_roles: &[&str],
     denied_message: &'static str,
 ) -> Result<()> {
-    ensure_group_permission(pool, actor, group_id, required_role, denied_message).await
+    ensure_group_permission(pool, actor, group_id, required_roles, denied_message).await
 }
 
 pub async fn list_group_allowed_roles(pool: &PgPool, group_id: GroupId) -> Result<Vec<String>> {

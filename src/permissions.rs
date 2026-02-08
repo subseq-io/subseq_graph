@@ -28,6 +28,20 @@ pub const ALL_GRAPH_PERMISSION_ROLES: &[&str] = &[
     GRAPH_ROLE_PERMISSIONS_UPDATE,
 ];
 
+const GRAPH_READ_ACCESS_ROLES: &[&str] = &[
+    GRAPH_ROLE_READ,
+    GRAPH_ROLE_CREATE,
+    GRAPH_ROLE_UPDATE,
+    GRAPH_ROLE_DELETE,
+];
+
+const GRAPH_CREATE_ACCESS_ROLES: &[&str] = &[GRAPH_ROLE_CREATE];
+const GRAPH_UPDATE_ACCESS_ROLES: &[&str] = &[GRAPH_ROLE_UPDATE];
+const GRAPH_DELETE_ACCESS_ROLES: &[&str] = &[GRAPH_ROLE_DELETE];
+const GRAPH_PERMISSIONS_READ_ACCESS_ROLES: &[&str] =
+    &[GRAPH_ROLE_PERMISSIONS_READ, GRAPH_ROLE_PERMISSIONS_UPDATE];
+const GRAPH_PERMISSIONS_UPDATE_ACCESS_ROLES: &[&str] = &[GRAPH_ROLE_PERMISSIONS_UPDATE];
+
 pub const fn graph_role_scope() -> &'static str {
     GRAPH_ROLE_SCOPE
 }
@@ -62,6 +76,31 @@ pub const fn graph_permissions_update_role() -> &'static str {
 
 pub const fn all_graph_permission_roles() -> &'static [&'static str] {
     ALL_GRAPH_PERMISSION_ROLES
+}
+
+/// Roles that can read/list graphs. Mutating roles imply read access.
+pub const fn graph_read_access_roles() -> &'static [&'static str] {
+    GRAPH_READ_ACCESS_ROLES
+}
+
+pub const fn graph_create_access_roles() -> &'static [&'static str] {
+    GRAPH_CREATE_ACCESS_ROLES
+}
+
+pub const fn graph_update_access_roles() -> &'static [&'static str] {
+    GRAPH_UPDATE_ACCESS_ROLES
+}
+
+pub const fn graph_delete_access_roles() -> &'static [&'static str] {
+    GRAPH_DELETE_ACCESS_ROLES
+}
+
+pub const fn graph_permissions_read_access_roles() -> &'static [&'static str] {
+    GRAPH_PERMISSIONS_READ_ACCESS_ROLES
+}
+
+pub const fn graph_permissions_update_access_roles() -> &'static [&'static str] {
+    GRAPH_PERMISSIONS_UPDATE_ACCESS_ROLES
 }
 
 /// Graph role grants for a specific group are stored with `scope_id = group_id.to_string()`.
