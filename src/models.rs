@@ -160,6 +160,19 @@ pub struct ListGraphsQuery {
     pub limit: Option<u32>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateGroupGraphPermissionsPayload {
+    pub allowed_roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupGraphPermissions {
+    pub group_id: GroupId,
+    pub allowed_roles: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct GraphDefinition {
     pub name: String,

@@ -7,11 +7,15 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use subseq_auth::group_id::GroupId;
 use subseq_auth::prelude::{AuthenticatedUser, ValidatesIdentity};
 
 use crate::db;
 use crate::error::{ErrorKind, LibError};
-use crate::models::{CreateGraphPayload, GraphId, ListGraphsQuery, Paged, UpdateGraphPayload};
+use crate::models::{
+    CreateGraphPayload, GraphId, GroupGraphPermissions, ListGraphsQuery, Paged, UpdateGraphPayload,
+    UpdateGroupGraphPermissionsPayload,
+};
 
 #[derive(Debug)]
 pub struct AppError(pub LibError);
@@ -41,7 +45,11 @@ pub trait HasPool {
     fn pool(&self) -> Arc<sqlx::PgPool>;
 }
 
-pub trait GraphApp: HasPool + ValidatesIdentity {}
+pub trait HasGraphPolicyAdminRoles {
+    fn graph_policy_admin_roles(&self) -> &'static [&'static str];
+}
+
+pub trait GraphApp: HasPool + ValidatesIdentity + HasGraphPolicyAdminRoles {}
 
 async fn create_graph_handler<S>(
     State(app): State<S>,
@@ -109,17 +117,71 @@ where
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn group_graph_permissions_get_handler<S>(
+    State(app): State<S>,
+    auth_user: AuthenticatedUser,
+    Path(group_id): Path<GroupId>,
+) -> Result<impl IntoResponse, AppError>
+where
+    S: GraphApp + Clone + Send + Sync + 'static,
+{
+    db::authorize_group_policy_edit(
+        &app.pool(),
+        auth_user.id(),
+        group_id,
+        app.graph_policy_admin_roles(),
+    )
+    .await?;
+
+    let allowed_roles = db::list_group_allowed_roles(&app.pool(), group_id).await?;
+    Ok(Json(GroupGraphPermissions {
+        group_id,
+        allowed_roles,
+    }))
+}
+
+async fn group_graph_permissions_put_handler<S>(
+    State(app): State<S>,
+    auth_user: AuthenticatedUser,
+    Path(group_id): Path<GroupId>,
+    Json(payload): Json<UpdateGroupGraphPermissionsPayload>,
+) -> Result<impl IntoResponse, AppError>
+where
+    S: GraphApp + Clone + Send + Sync + 'static,
+{
+    db::authorize_group_policy_edit(
+        &app.pool(),
+        auth_user.id(),
+        group_id,
+        app.graph_policy_admin_roles(),
+    )
+    .await?;
+
+    db::set_group_allowed_roles(&app.pool(), group_id, &payload.allowed_roles).await?;
+    let allowed_roles = db::list_group_allowed_roles(&app.pool(), group_id).await?;
+    Ok(Json(GroupGraphPermissions {
+        group_id,
+        allowed_roles,
+    }))
+}
+
 pub fn routes<S>() -> Router<S>
 where
     S: GraphApp + Clone + Send + Sync + 'static,
 {
     tracing::info!("Registering route /graph [GET,POST]");
     tracing::info!("Registering route /graph/{{graph_id}} [GET,PUT,DELETE]");
+    tracing::info!("Registering route /graph/group/{{group_id}}/permissions [GET,PUT]");
 
     Router::new()
         .route(
             "/graph",
             get(list_graphs_handler::<S>).post(create_graph_handler::<S>),
+        )
+        .route(
+            "/graph/group/{group_id}/permissions",
+            get(group_graph_permissions_get_handler::<S>)
+                .put(group_graph_permissions_put_handler::<S>),
         )
         .route(
             "/graph/{graph_id}",

@@ -650,6 +650,89 @@ async fn group_exists(pool: &PgPool, group_id: GroupId) -> Result<bool> {
     Ok(exists.0)
 }
 
+fn normalize_admin_roles(admin_roles: &[&str]) -> Vec<String> {
+    let mut dedupe = HashSet::new();
+    admin_roles
+        .iter()
+        .map(|role| role.trim())
+        .filter(|role| !role.is_empty())
+        .filter(|role| dedupe.insert((*role).to_string()))
+        .map(ToString::to_string)
+        .collect()
+}
+
+async fn user_has_group_admin_role(
+    pool: &PgPool,
+    actor: UserId,
+    group_id: GroupId,
+    admin_roles: &[&str],
+) -> Result<bool> {
+    let admin_roles = normalize_admin_roles(admin_roles);
+    if admin_roles.is_empty() {
+        return Ok(false);
+    }
+
+    let has_role: (bool,) = sqlx::query_as(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM auth.group_memberships gm
+            JOIN auth.groups g
+              ON g.id = gm.group_id
+            JOIN auth.users u
+              ON u.id = gm.user_id
+            WHERE gm.group_id = $1
+              AND gm.user_id = $2
+              AND g.active = TRUE
+              AND u.active = TRUE
+              AND gm.role_name = ANY($3)
+        )
+        "#,
+    )
+    .bind(group_id.0)
+    .bind(actor.0)
+    .bind(admin_roles)
+    .fetch_one(pool)
+    .await
+    .map_err(|err| db_err("Failed to query group admin roles", err))?;
+
+    Ok(has_role.0)
+}
+
+pub async fn authorize_group_policy_edit(
+    pool: &PgPool,
+    actor: UserId,
+    group_id: GroupId,
+    admin_roles: &[&str],
+) -> Result<()> {
+    if !group_exists(pool, group_id).await? {
+        return Err(LibError::not_found(
+            "Group not found",
+            anyhow!("group {} not found", group_id),
+        ));
+    }
+
+    if admin_roles.is_empty() {
+        return Err(LibError::forbidden(
+            "No admin roles are configured for graph permissions",
+            anyhow!("group policy edit denied; no configured admin roles"),
+        ));
+    }
+
+    if user_has_group_admin_role(pool, actor, group_id, admin_roles).await? {
+        Ok(())
+    } else {
+        Err(LibError::forbidden(
+            "You do not have permission to manage graph roles for this group",
+            anyhow!(
+                "user {} lacks allowed admin role for group {}",
+                actor,
+                group_id
+            ),
+        ))
+    }
+}
+
 pub async fn list_group_allowed_roles(pool: &PgPool, group_id: GroupId) -> Result<Vec<String>> {
     if !group_exists(pool, group_id).await? {
         return Err(LibError::not_found(
