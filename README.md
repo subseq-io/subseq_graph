@@ -96,3 +96,39 @@ Example:
   }
 }
 ```
+
+## Agent/MCP Operations
+
+`subseq_graph::operations` provides a high-level surface intended for MCP/tool
+handlers so graph logic stays colocated with graph code:
+
+- `GraphOperations::create_graph`
+- `GraphOperations::extend_graph` (append nodes/edges to an existing graph)
+- `GraphOperations::replace_graph` (full definition replacement)
+- `GraphOperations::get_graph`
+- `GraphOperations::list_graphs`
+- `GraphOperations::delete_graph`
+- `GraphOperations::get_group_permissions`
+- `GraphOperations::set_group_permissions`
+- `GraphOperations::execute` with `GraphOperation` enum for single-dispatch tool handlers
+
+`extend_graph` merges new nodes/edges into the current graph while preserving
+existing structure:
+
+- Rejects duplicate node IDs.
+- Validates that new edges reference existing or newly-added nodes.
+- Deduplicates duplicate edges (existing pair wins).
+
+## MCP Auth Mapping
+
+MCP/tool requests should map to this library by first resolving caller identity
+through `subseq_auth` session/token validation, then passing the resulting
+trusted `UserId` into `GraphOperations` methods.
+
+Security rule:
+
+- Do not accept `user_id` from model/tool arguments.
+- Always derive `actor: UserId` from authenticated request context.
+
+This keeps agent actions aligned with the same role/scope checks used by the
+HTTP API.

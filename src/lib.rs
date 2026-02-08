@@ -5,6 +5,8 @@ pub mod api;
 pub mod db;
 pub mod error;
 pub mod models;
+#[cfg(feature = "sqlx")]
+pub mod operations;
 pub mod permissions;
 
 pub mod prelude {
@@ -21,6 +23,10 @@ pub mod prelude {
         CreateGraphPayload, DirectedGraph, GraphEdge, GraphId, GraphNode, GraphNodeId,
         GraphSummary, GroupGraphPermissions, ListGraphsQuery, NewGraphEdge, NewGraphNode, Paged,
         UpdateGraphPayload, UpdateGroupGraphPermissionsPayload,
+    };
+    #[cfg(feature = "sqlx")]
+    pub use crate::operations::{
+        ExtendGraphPayload, GraphOperation, GraphOperationResult, GraphOperations,
     };
     pub use crate::permissions::{
         all_graph_permission_roles, graph_create_access_roles, graph_create_role,
