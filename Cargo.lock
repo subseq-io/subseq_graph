@@ -2558,6 +2558,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 [[package]]
 name = "subseq_auth"
 version = "0.1.0"
+source = "git+https://github.com/subseq-io/subseq_auth.git?branch=main#4731c29ff4f38bbaa03e739209713d5be9bb457a"
 dependencies = [
  "anyhow",
  "axum",
