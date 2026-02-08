@@ -4,10 +4,18 @@ use crate::models::{DirectedGraph, GraphNode, GraphNodeId};
 
 pub fn adjacency_map(graph: &DirectedGraph) -> HashMap<GraphNodeId, Vec<GraphNodeId>> {
     let mut adjacency = HashMap::new();
+    let mut known_nodes = HashMap::new();
     for node in &graph.nodes {
         adjacency.entry(node.id).or_insert_with(Vec::new);
+        known_nodes.insert(node.id, ());
     }
     for edge in &graph.edges {
+        if !known_nodes.contains_key(&edge.from_node_id)
+            || !known_nodes.contains_key(&edge.to_node_id)
+        {
+            // Best-effort behavior: skip dangling edges instead of failing the whole computation.
+            continue;
+        }
         adjacency
             .entry(edge.from_node_id)
             .or_insert_with(Vec::new)
@@ -23,18 +31,29 @@ pub fn has_cycle(graph: &DirectedGraph) -> bool {
 pub fn topological_sort(graph: &DirectedGraph) -> Vec<&GraphNode> {
     let mut node_lookup = HashMap::with_capacity(graph.nodes.len());
     let mut indegree: HashMap<GraphNodeId, usize> = HashMap::with_capacity(graph.nodes.len());
-    let mut adjacency = adjacency_map(graph);
+    let mut adjacency: HashMap<GraphNodeId, Vec<GraphNodeId>> =
+        HashMap::with_capacity(graph.nodes.len());
 
     for node in &graph.nodes {
         node_lookup.insert(node.id, node);
         indegree.insert(node.id, 0);
+        adjacency.insert(node.id, Vec::new());
     }
 
     for edge in &graph.edges {
-        if let Some(entry) = indegree.get_mut(&edge.to_node_id) {
-            *entry += 1;
+        // Best-effort behavior: ignore invalid edge endpoints.
+        if !node_lookup.contains_key(&edge.from_node_id)
+            || !node_lookup.contains_key(&edge.to_node_id)
+        {
+            continue;
         }
-        adjacency.entry(edge.to_node_id).or_insert_with(Vec::new);
+        *indegree
+            .get_mut(&edge.to_node_id)
+            .expect("to_node_id should exist in indegree") += 1;
+        adjacency
+            .entry(edge.from_node_id)
+            .or_insert_with(Vec::new)
+            .push(edge.to_node_id);
     }
 
     let mut queue = VecDeque::new();
