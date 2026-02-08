@@ -192,6 +192,12 @@ Request body:
 }
 ```
 
+Performance benchmarks for mutation checks are available via:
+
+```bash
+cargo bench --bench mutation_checks
+```
+
 Response body:
 
 ```json

@@ -89,12 +89,17 @@ Response includes:
 
 ## Performance Validation
 
-Add performance-oriented tests on synthetic random DAGs in the thousands-scale
-range to guard against regressions in single-mutation checks:
+Use Criterion benchmarks (not unit tests) on synthetic random graphs in the
+thousands-scale range to guard against regressions in single-mutation checks:
 
-- Current suite uses `3,000` nodes and `9,000` edges.
-- Runs repeated add/remove delta checks and asserts bounded runtime in debug
-  builds with generous thresholds.
+- Benchmark target: `benches/mutation_checks.rs`
+- Run with: `cargo bench --bench mutation_checks`
+- Sizes currently covered:
+  - `1,000` nodes / `3,000` edges
+  - `3,000` nodes / `9,000` edges
+- Measures per-operation latency/throughput for:
+  - add-edge preflight checks
+  - remove-edge preflight checks (including isolate-subgraph signal)
 
 ## Auth
 

@@ -19,3 +19,10 @@ uuid = { version = "1.18.1", features = ["v4", "serde"] }
 default = ["api"]
 api = ["dep:axum", "sqlx"]
 sqlx = ["dep:sqlx"]
+
+[dev-dependencies]
+criterion = "0.5.1"
+
+[[bench]]
+name = "mutation_checks"
+harness = false

@@ -473,9 +473,6 @@ fn reachable_nodes(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-    use std::time::{Duration, Instant};
-
     use serde_json::json;
     use uuid::Uuid;
 
@@ -685,71 +682,5 @@ mod tests {
             GraphInvariantViolation::DisconnectedTree { .. }
         )));
         assert!(index.would_remove_edge_isolate_subgraph(root, child));
-    }
-
-    fn lcg_next(state: &mut u64) -> u64 {
-        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        *state
-    }
-
-    fn synthetic_dag(node_count: usize, edge_count: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
-        let nodes = (0..node_count)
-            .map(|idx| {
-                let id = GraphNodeId(Uuid::from_u128((idx as u128) + 1));
-                node(id, "N")
-            })
-            .collect::<Vec<_>>();
-        let ids = nodes.iter().map(|n| n.id).collect::<Vec<_>>();
-
-        let mut state = 0x1234_5678_9abc_def0u64;
-        let mut seen = HashSet::with_capacity(edge_count);
-        let mut edges = Vec::with_capacity(edge_count);
-        while edges.len() < edge_count {
-            let a = (lcg_next(&mut state) as usize) % node_count;
-            let b = (lcg_next(&mut state) as usize) % node_count;
-            if a == b {
-                continue;
-            }
-            let (from, to) = if a < b { (a, b) } else { (b, a) };
-            let pair = (ids[from], ids[to]);
-            if seen.insert(pair) {
-                edges.push(edge(pair.0, pair.1));
-            }
-        }
-
-        (nodes, edges)
-    }
-
-    #[test]
-    fn mutation_delta_checks_perform_well_on_thousand_scale_graphs() {
-        let (nodes, edges) = synthetic_dag(3_000, 9_000);
-        let ids = nodes.iter().map(|n| n.id).collect::<Vec<_>>();
-        let index = GraphMutationIndex::new(GraphKind::Dag, &nodes, &edges);
-
-        let start_add = Instant::now();
-        for idx in 0..2_000usize {
-            let from = ids[(idx * 31) % ids.len()];
-            let to = ids[(idx * 17 + 13) % ids.len()];
-            let _ = index.would_add_edge_violations(from, to);
-        }
-        let add_elapsed = start_add.elapsed();
-
-        let start_remove = Instant::now();
-        for edge in edges.iter().take(2_000) {
-            let _ = index.would_remove_edge_violations(edge.from_node_id, edge.to_node_id);
-        }
-        let remove_elapsed = start_remove.elapsed();
-
-        // Generous guardrail for debug builds; this is intended to catch algorithmic regressions.
-        assert!(
-            add_elapsed < Duration::from_secs(5),
-            "add-edge delta checks were too slow: {:?}",
-            add_elapsed
-        );
-        assert!(
-            remove_elapsed < Duration::from_secs(5),
-            "remove-edge delta checks were too slow: {:?}",
-            remove_elapsed
-        );
     }
 }
