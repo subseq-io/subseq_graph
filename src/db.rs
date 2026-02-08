@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::anyhow;
 use once_cell::sync::Lazy;
 use sqlx::migrate::{MigrateError, Migrator};
@@ -115,11 +117,6 @@ fn db_err(public: &'static str, err: sqlx::Error) -> LibError {
     LibError::database(public, anyhow!(err))
 }
 
-fn role_filter(allowed_roles: Option<&[String]>) -> Option<Vec<String>> {
-    // None means "all roles are allowed" for group-based graph access.
-    allowed_roles.map(|roles| roles.to_vec())
-}
-
 async fn graph_exists(pool: &PgPool, graph_id: GraphId) -> Result<bool> {
     let exists: (bool,) = sqlx::query_as(
         r#"
@@ -138,13 +135,7 @@ async fn graph_exists(pool: &PgPool, graph_id: GraphId) -> Result<bool> {
     Ok(exists.0)
 }
 
-async fn ensure_group_member(
-    pool: &PgPool,
-    actor: UserId,
-    group_id: GroupId,
-    allowed_roles: Option<&[String]>,
-) -> Result<()> {
-    let roles = role_filter(allowed_roles);
+async fn ensure_group_member(pool: &PgPool, actor: UserId, group_id: GroupId) -> Result<()> {
     let is_member: (bool,) = sqlx::query_as(
         r#"
         SELECT EXISTS(
@@ -158,13 +149,24 @@ async fn ensure_group_member(
               AND gm.user_id = $2
               AND g.active = TRUE
               AND u.active = TRUE
-              AND ($3::text[] IS NULL OR gm.role_name = ANY($3))
+              AND (
+                  NOT EXISTS (
+                      SELECT 1
+                      FROM graph.group_allowed_roles gar
+                      WHERE gar.group_id = gm.group_id
+                  )
+                  OR EXISTS (
+                      SELECT 1
+                      FROM graph.group_allowed_roles gar
+                      WHERE gar.group_id = gm.group_id
+                        AND gar.role_name = gm.role_name
+                  )
+              )
         )
         "#,
     )
     .bind(group_id.0)
     .bind(actor.0)
-    .bind(roles)
     .fetch_one(pool)
     .await
     .map_err(|err| db_err("Failed to query group membership", err))?;
@@ -183,9 +185,7 @@ async fn load_accessible_graph(
     pool: &PgPool,
     actor: UserId,
     graph_id: GraphId,
-    allowed_roles: Option<&[String]>,
 ) -> Result<GraphRow> {
-    let roles = role_filter(allowed_roles);
     let row = sqlx::query_as::<_, GraphRow>(
         r#"
         SELECT
@@ -214,7 +214,19 @@ async fn load_accessible_graph(
                         AND gm.user_id = $2
                         AND grp.active = TRUE
                         AND usr.active = TRUE
-                        AND ($3::text[] IS NULL OR gm.role_name = ANY($3))
+                        AND (
+                            NOT EXISTS (
+                                SELECT 1
+                                FROM graph.group_allowed_roles gar
+                                WHERE gar.group_id = gm.group_id
+                            )
+                            OR EXISTS (
+                                SELECT 1
+                                FROM graph.group_allowed_roles gar
+                                WHERE gar.group_id = gm.group_id
+                                  AND gar.role_name = gm.role_name
+                            )
+                        )
                   )
               )
           )
@@ -223,7 +235,6 @@ async fn load_accessible_graph(
     )
     .bind(graph_id.0)
     .bind(actor.0)
-    .bind(roles)
     .fetch_optional(pool)
     .await
     .map_err(|err| db_err("Failed to query graph", err))?;
@@ -288,18 +299,9 @@ pub async fn create_graph(
     actor: UserId,
     payload: CreateGraphPayload,
 ) -> Result<DirectedGraph> {
-    create_graph_with_roles(pool, actor, payload, None).await
-}
-
-pub async fn create_graph_with_roles(
-    pool: &PgPool,
-    actor: UserId,
-    payload: CreateGraphPayload,
-    allowed_roles: Option<&[String]>,
-) -> Result<DirectedGraph> {
     let definition = payload.normalize()?;
     if let Some(group_id) = definition.owner_group_id {
-        ensure_group_member(pool, actor, group_id, allowed_roles).await?;
+        ensure_group_member(pool, actor, group_id).await?;
     }
 
     let graph_id = GraphId(Uuid::new_v4());
@@ -339,20 +341,11 @@ pub async fn create_graph_with_roles(
         .await
         .map_err(|err| db_err("Failed to commit transaction", err))?;
 
-    get_graph_with_roles(pool, actor, graph_id, allowed_roles).await
+    get_graph(pool, actor, graph_id).await
 }
 
 pub async fn get_graph(pool: &PgPool, actor: UserId, graph_id: GraphId) -> Result<DirectedGraph> {
-    get_graph_with_roles(pool, actor, graph_id, None).await
-}
-
-pub async fn get_graph_with_roles(
-    pool: &PgPool,
-    actor: UserId,
-    graph_id: GraphId,
-    allowed_roles: Option<&[String]>,
-) -> Result<DirectedGraph> {
-    let graph = load_accessible_graph(pool, actor, graph_id, allowed_roles).await?;
+    let graph = load_accessible_graph(pool, actor, graph_id).await?;
     let nodes = sqlx::query_as::<_, GraphNodeRow>(
         r#"
         SELECT id, label, metadata
@@ -388,18 +381,7 @@ pub async fn list_graphs(
     page: u32,
     limit: u32,
 ) -> Result<Vec<GraphSummary>> {
-    list_graphs_with_roles(pool, actor, page, limit, None).await
-}
-
-pub async fn list_graphs_with_roles(
-    pool: &PgPool,
-    actor: UserId,
-    page: u32,
-    limit: u32,
-    allowed_roles: Option<&[String]>,
-) -> Result<Vec<GraphSummary>> {
     let offset = (page.saturating_sub(1) as i64).saturating_mul(limit as i64);
-    let roles = role_filter(allowed_roles);
 
     let rows = sqlx::query_as::<_, GraphSummaryRow>(
         r#"
@@ -441,7 +423,19 @@ pub async fn list_graphs_with_roles(
                       AND gm.user_id = $1
                       AND grp.active = TRUE
                       AND usr.active = TRUE
-                      AND ($4::text[] IS NULL OR gm.role_name = ANY($4))
+                      AND (
+                          NOT EXISTS (
+                              SELECT 1
+                              FROM graph.group_allowed_roles gar
+                              WHERE gar.group_id = gm.group_id
+                          )
+                          OR EXISTS (
+                              SELECT 1
+                              FROM graph.group_allowed_roles gar
+                              WHERE gar.group_id = gm.group_id
+                                AND gar.role_name = gm.role_name
+                          )
+                      )
                 )
             )
         )
@@ -452,7 +446,6 @@ pub async fn list_graphs_with_roles(
     .bind(actor.0)
     .bind(limit as i64)
     .bind(offset)
-    .bind(roles)
     .fetch_all(pool)
     .await
     .map_err(|err| db_err("Failed to list graphs", err))?;
@@ -466,21 +459,10 @@ pub async fn update_graph(
     graph_id: GraphId,
     payload: UpdateGraphPayload,
 ) -> Result<DirectedGraph> {
-    update_graph_with_roles(pool, actor, graph_id, payload, None).await
-}
-
-pub async fn update_graph_with_roles(
-    pool: &PgPool,
-    actor: UserId,
-    graph_id: GraphId,
-    payload: UpdateGraphPayload,
-    allowed_roles: Option<&[String]>,
-) -> Result<DirectedGraph> {
     let definition = payload.normalize()?;
-    let roles = role_filter(allowed_roles);
 
     if let Some(group_id) = definition.owner_group_id {
-        ensure_group_member(pool, actor, group_id, allowed_roles).await?;
+        ensure_group_member(pool, actor, group_id).await?;
     }
 
     let mut tx = pool
@@ -512,7 +494,19 @@ pub async fn update_graph_with_roles(
                         AND gm.user_id = $6
                         AND grp.active = TRUE
                         AND usr.active = TRUE
-                        AND ($7::text[] IS NULL OR gm.role_name = ANY($7))
+                        AND (
+                            NOT EXISTS (
+                                SELECT 1
+                                FROM graph.group_allowed_roles gar
+                                WHERE gar.group_id = gm.group_id
+                            )
+                            OR EXISTS (
+                                SELECT 1
+                                FROM graph.group_allowed_roles gar
+                                WHERE gar.group_id = gm.group_id
+                                  AND gar.role_name = gm.role_name
+                            )
+                        )
                   )
               )
           )
@@ -524,7 +518,6 @@ pub async fn update_graph_with_roles(
     .bind(&definition.metadata)
     .bind(graph_id.0)
     .bind(actor.0)
-    .bind(roles.clone())
     .execute(&mut *tx)
     .await
     .map_err(|err| db_err("Failed to update graph", err))?;
@@ -575,20 +568,10 @@ pub async fn update_graph_with_roles(
         .await
         .map_err(|err| db_err("Failed to commit transaction", err))?;
 
-    get_graph_with_roles(pool, actor, graph_id, allowed_roles).await
+    get_graph(pool, actor, graph_id).await
 }
 
 pub async fn delete_graph(pool: &PgPool, actor: UserId, graph_id: GraphId) -> Result<()> {
-    delete_graph_with_roles(pool, actor, graph_id, None).await
-}
-
-pub async fn delete_graph_with_roles(
-    pool: &PgPool,
-    actor: UserId,
-    graph_id: GraphId,
-    allowed_roles: Option<&[String]>,
-) -> Result<()> {
-    let roles = role_filter(allowed_roles);
     let deleted = sqlx::query(
         r#"
         DELETE FROM graph.graphs
@@ -608,7 +591,19 @@ pub async fn delete_graph_with_roles(
                         AND gm.user_id = $2
                         AND grp.active = TRUE
                         AND usr.active = TRUE
-                        AND ($3::text[] IS NULL OR gm.role_name = ANY($3))
+                        AND (
+                            NOT EXISTS (
+                                SELECT 1
+                                FROM graph.group_allowed_roles gar
+                                WHERE gar.group_id = gm.group_id
+                            )
+                            OR EXISTS (
+                                SELECT 1
+                                FROM graph.group_allowed_roles gar
+                                WHERE gar.group_id = gm.group_id
+                                  AND gar.role_name = gm.role_name
+                            )
+                        )
                   )
               )
           )
@@ -616,7 +611,6 @@ pub async fn delete_graph_with_roles(
     )
     .bind(graph_id.0)
     .bind(actor.0)
-    .bind(roles)
     .execute(pool)
     .await
     .map_err(|err| db_err("Failed to delete graph", err))?;
@@ -634,6 +628,104 @@ pub async fn delete_graph_with_roles(
             ))
         };
     }
+
+    Ok(())
+}
+
+async fn group_exists(pool: &PgPool, group_id: GroupId) -> Result<bool> {
+    let exists: (bool,) = sqlx::query_as(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM auth.groups
+            WHERE id = $1
+        )
+        "#,
+    )
+    .bind(group_id.0)
+    .fetch_one(pool)
+    .await
+    .map_err(|err| db_err("Failed to query group", err))?;
+
+    Ok(exists.0)
+}
+
+pub async fn list_group_allowed_roles(pool: &PgPool, group_id: GroupId) -> Result<Vec<String>> {
+    if !group_exists(pool, group_id).await? {
+        return Err(LibError::not_found(
+            "Group not found",
+            anyhow!("group {} not found", group_id),
+        ));
+    }
+
+    sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT role_name
+        FROM graph.group_allowed_roles
+        WHERE group_id = $1
+        ORDER BY role_name ASC
+        "#,
+    )
+    .bind(group_id.0)
+    .fetch_all(pool)
+    .await
+    .map_err(|err| db_err("Failed to list allowed roles", err))
+}
+
+pub async fn set_group_allowed_roles(
+    pool: &PgPool,
+    group_id: GroupId,
+    roles: &[String],
+) -> Result<()> {
+    if !group_exists(pool, group_id).await? {
+        return Err(LibError::not_found(
+            "Group not found",
+            anyhow!("group {} not found", group_id),
+        ));
+    }
+
+    let mut dedupe = HashSet::new();
+    let cleaned_roles: Vec<String> = roles
+        .iter()
+        .map(|role| role.trim())
+        .filter(|role| !role.is_empty())
+        .filter(|role| dedupe.insert((*role).to_string()))
+        .map(ToString::to_string)
+        .collect();
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|err| db_err("Failed to start transaction", err))?;
+
+    sqlx::query(
+        r#"
+        DELETE FROM graph.group_allowed_roles
+        WHERE group_id = $1
+        "#,
+    )
+    .bind(group_id.0)
+    .execute(&mut *tx)
+    .await
+    .map_err(|err| db_err("Failed to clear allowed roles", err))?;
+
+    for role in &cleaned_roles {
+        sqlx::query(
+            r#"
+            INSERT INTO graph.group_allowed_roles (group_id, role_name)
+            VALUES ($1, $2)
+            "#,
+        )
+        .bind(group_id.0)
+        .bind(role)
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| db_err("Failed to save allowed roles", err))?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|err| db_err("Failed to commit transaction", err))?;
 
     Ok(())
 }

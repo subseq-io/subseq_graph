@@ -12,9 +12,8 @@ pub mod prelude {
     pub use crate::api::{GraphApp, HasPool};
     #[cfg(feature = "sqlx")]
     pub use crate::db::{
-        create_graph, create_graph_tables, create_graph_with_roles, delete_graph,
-        delete_graph_with_roles, get_graph, get_graph_with_roles, list_graphs,
-        list_graphs_with_roles, update_graph, update_graph_with_roles,
+        create_graph, create_graph_tables, delete_graph, get_graph, list_graphs,
+        list_group_allowed_roles, set_group_allowed_roles, update_graph,
     };
     pub use crate::error::{ErrorKind, LibError, Result};
     pub use crate::models::{

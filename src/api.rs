@@ -41,11 +41,7 @@ pub trait HasPool {
     fn pool(&self) -> Arc<sqlx::PgPool>;
 }
 
-pub trait GraphApp: HasPool + ValidatesIdentity {
-    fn allowed_group_roles(&self) -> Option<Vec<String>> {
-        None
-    }
-}
+pub trait GraphApp: HasPool + ValidatesIdentity {}
 
 async fn create_graph_handler<S>(
     State(app): State<S>,
@@ -55,14 +51,7 @@ async fn create_graph_handler<S>(
 where
     S: GraphApp + Clone + Send + Sync + 'static,
 {
-    let allowed_roles = app.allowed_group_roles();
-    let graph = db::create_graph_with_roles(
-        &app.pool(),
-        auth_user.id(),
-        payload,
-        allowed_roles.as_deref(),
-    )
-    .await?;
+    let graph = db::create_graph(&app.pool(), auth_user.id(), payload).await?;
     Ok((StatusCode::CREATED, Json(graph)))
 }
 
@@ -75,15 +64,7 @@ where
     S: GraphApp + Clone + Send + Sync + 'static,
 {
     let (page, limit) = query.pagination();
-    let allowed_roles = app.allowed_group_roles();
-    let graphs = db::list_graphs_with_roles(
-        &app.pool(),
-        auth_user.id(),
-        page,
-        limit,
-        allowed_roles.as_deref(),
-    )
-    .await?;
+    let graphs = db::list_graphs(&app.pool(), auth_user.id(), page, limit).await?;
     Ok(Json(Paged {
         page,
         limit,
@@ -99,14 +80,7 @@ async fn get_graph_handler<S>(
 where
     S: GraphApp + Clone + Send + Sync + 'static,
 {
-    let allowed_roles = app.allowed_group_roles();
-    let graph = db::get_graph_with_roles(
-        &app.pool(),
-        auth_user.id(),
-        graph_id,
-        allowed_roles.as_deref(),
-    )
-    .await?;
+    let graph = db::get_graph(&app.pool(), auth_user.id(), graph_id).await?;
     Ok(Json(graph))
 }
 
@@ -119,15 +93,7 @@ async fn update_graph_handler<S>(
 where
     S: GraphApp + Clone + Send + Sync + 'static,
 {
-    let allowed_roles = app.allowed_group_roles();
-    let graph = db::update_graph_with_roles(
-        &app.pool(),
-        auth_user.id(),
-        graph_id,
-        payload,
-        allowed_roles.as_deref(),
-    )
-    .await?;
+    let graph = db::update_graph(&app.pool(), auth_user.id(), graph_id, payload).await?;
     Ok(Json(graph))
 }
 
@@ -139,14 +105,7 @@ async fn delete_graph_handler<S>(
 where
     S: GraphApp + Clone + Send + Sync + 'static,
 {
-    let allowed_roles = app.allowed_group_roles();
-    db::delete_graph_with_roles(
-        &app.pool(),
-        auth_user.id(),
-        graph_id,
-        allowed_roles.as_deref(),
-    )
-    .await?;
+    db::delete_graph(&app.pool(), auth_user.id(), graph_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
