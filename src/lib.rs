@@ -16,19 +16,27 @@ pub mod prelude {
     pub use crate::api::{GraphApp, HasPool};
     #[cfg(feature = "sqlx")]
     pub use crate::db::{
-        authorize_group_permission, create_graph, create_graph_tables, delete_graph, get_graph,
-        list_graphs, list_group_allowed_roles, set_group_allowed_roles, update_graph,
+        add_edge, add_edge_tx, apply_graph_delta_batch_tx, authorize_group_permission,
+        create_graph, create_graph_tables, delete_graph, find_node_by_external_id, get_graph,
+        list_graph_edges_by_metadata, list_graph_nodes_by_metadata, list_graphs,
+        list_group_allowed_roles, list_incident_edges_for_external_id,
+        list_incident_edges_for_node, remove_edge, remove_edge_tx, remove_node, remove_node_tx,
+        set_group_allowed_roles, update_graph, update_graph_with_guard, upsert_edge_metadata,
+        upsert_edge_metadata_tx, upsert_node, upsert_node_tx,
     };
     pub use crate::error::{ErrorKind, LibError, Result};
     pub use crate::invariants::{
         GraphMutationIndex, ensure_graph_invariants, graph_invariant_violations,
     };
     pub use crate::models::{
-        CreateGraphPayload, DirectedGraph, EdgeMutationCheckResponse, EdgeMutationPayload,
-        GraphEdge, GraphId, GraphInvariantInput, GraphInvariantViolation, GraphKind, GraphNode,
-        GraphNodeId, GraphSummary, GroupGraphPermissions, ListGraphsQuery, NewGraphEdge,
-        NewGraphNode, Paged, UpdateGraphPayload, UpdateGroupGraphPermissionsPayload,
-        ValidateGraphEdgesPayload, ValidateGraphEdgesResponse,
+        AddEdgePayload, CreateGraphPayload, DirectedGraph, EdgeMutationCheckResponse,
+        EdgeMutationPayload, GraphDeltaCommand, GraphDeltaOperation, GraphEdge, GraphId,
+        GraphInvariantInput, GraphInvariantViolation, GraphKind, GraphNode, GraphNodeId,
+        GraphSummary, GroupGraphPermissions, GuardedUpdateGraphPayload, ListGraphsQuery,
+        MetadataFilterPayload, NewGraphEdge, NewGraphNode, Paged, RemoveEdgePayload,
+        RemoveNodePayload, UpdateGraphPayload, UpdateGroupGraphPermissionsPayload,
+        UpsertEdgeMetadataPayload, UpsertNodePayload, ValidateGraphEdgesPayload,
+        ValidateGraphEdgesResponse,
     };
     #[cfg(feature = "sqlx")]
     pub use crate::operations::{

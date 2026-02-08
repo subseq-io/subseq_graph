@@ -216,6 +216,104 @@ pub struct EdgeMutationCheckResponse {
     pub violations: Vec<GraphInvariantViolation>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpsertNodePayload {
+    pub node_id: Option<GraphNodeId>,
+    pub label: String,
+    pub metadata: Option<Value>,
+    #[serde(default)]
+    pub expected_updated_at: Option<NaiveDateTime>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveNodePayload {
+    pub node_id: GraphNodeId,
+    #[serde(default)]
+    pub expected_updated_at: Option<NaiveDateTime>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddEdgePayload {
+    pub from_node_id: GraphNodeId,
+    pub to_node_id: GraphNodeId,
+    pub metadata: Option<Value>,
+    #[serde(default)]
+    pub expected_updated_at: Option<NaiveDateTime>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveEdgePayload {
+    pub from_node_id: GraphNodeId,
+    pub to_node_id: GraphNodeId,
+    #[serde(default)]
+    pub expected_updated_at: Option<NaiveDateTime>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpsertEdgeMetadataPayload {
+    pub from_node_id: GraphNodeId,
+    pub to_node_id: GraphNodeId,
+    pub metadata: Value,
+    #[serde(default)]
+    pub expected_updated_at: Option<NaiveDateTime>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataFilterPayload {
+    pub metadata_contains: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuardedUpdateGraphPayload {
+    pub graph: UpdateGraphPayload,
+    #[serde(default)]
+    pub expected_updated_at: Option<NaiveDateTime>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum GraphDeltaOperation {
+    AddEdge {
+        from_node_id: GraphNodeId,
+        to_node_id: GraphNodeId,
+        metadata: Option<Value>,
+    },
+    RemoveEdge {
+        from_node_id: GraphNodeId,
+        to_node_id: GraphNodeId,
+    },
+    UpsertEdgeMetadata {
+        from_node_id: GraphNodeId,
+        to_node_id: GraphNodeId,
+        metadata: Value,
+    },
+    UpsertNode {
+        node_id: Option<GraphNodeId>,
+        label: String,
+        metadata: Option<Value>,
+    },
+    RemoveNode {
+        node_id: GraphNodeId,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphDeltaCommand {
+    pub graph_id: GraphId,
+    #[serde(flatten)]
+    pub operation: GraphDeltaOperation,
+    #[serde(default)]
+    pub expected_updated_at: Option<NaiveDateTime>,
+}
+
 #[derive(Debug, Clone)]
 pub struct GraphInvariantInput {
     pub kind: GraphKind,

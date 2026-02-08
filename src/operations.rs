@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -13,9 +13,11 @@ use subseq_auth::user_id::UserId;
 use crate::db;
 use crate::error::{LibError, Result};
 use crate::models::{
-    CreateGraphPayload, DirectedGraph, GraphId, GraphNodeId, GraphSummary, GroupGraphPermissions,
-    ListGraphsQuery, NewGraphEdge, NewGraphNode, Paged, UpdateGraphPayload,
-    UpdateGroupGraphPermissionsPayload,
+    AddEdgePayload, CreateGraphPayload, DirectedGraph, GraphEdge, GraphId, GraphNode, GraphNodeId,
+    GraphSummary, GroupGraphPermissions, GuardedUpdateGraphPayload, ListGraphsQuery,
+    MetadataFilterPayload, NewGraphEdge, NewGraphNode, Paged, RemoveEdgePayload, RemoveNodePayload,
+    UpdateGraphPayload, UpdateGroupGraphPermissionsPayload, UpsertEdgeMetadataPayload,
+    UpsertNodePayload,
 };
 use crate::permissions;
 
@@ -37,6 +39,10 @@ pub enum GraphOperation {
         graph_id: GraphId,
         payload: UpdateGraphPayload,
     },
+    ReplaceGuarded {
+        graph_id: GraphId,
+        payload: GuardedUpdateGraphPayload,
+    },
     Get {
         graph_id: GraphId,
     },
@@ -45,6 +51,46 @@ pub enum GraphOperation {
     },
     Delete {
         graph_id: GraphId,
+    },
+    AddEdge {
+        graph_id: GraphId,
+        payload: AddEdgePayload,
+    },
+    RemoveEdge {
+        graph_id: GraphId,
+        payload: RemoveEdgePayload,
+    },
+    UpsertEdgeMetadata {
+        graph_id: GraphId,
+        payload: UpsertEdgeMetadataPayload,
+    },
+    UpsertNode {
+        graph_id: GraphId,
+        payload: UpsertNodePayload,
+    },
+    RemoveNode {
+        graph_id: GraphId,
+        payload: RemoveNodePayload,
+    },
+    FindNodeByExternalId {
+        graph_id: GraphId,
+        external_id: String,
+    },
+    QueryNodesByMetadata {
+        graph_id: GraphId,
+        payload: MetadataFilterPayload,
+    },
+    QueryEdgesByMetadata {
+        graph_id: GraphId,
+        payload: MetadataFilterPayload,
+    },
+    IncidentEdgesForNode {
+        graph_id: GraphId,
+        node_id: GraphNodeId,
+    },
+    IncidentEdgesForExternalId {
+        graph_id: GraphId,
+        external_id: String,
     },
     GetGroupPermissions {
         group_id: GroupId,
@@ -67,6 +113,15 @@ pub struct ExtendGraphPayload {
 pub enum GraphOperationResult {
     Graph {
         graph: DirectedGraph,
+    },
+    Node {
+        node: GraphNode,
+    },
+    Nodes {
+        nodes: Vec<GraphNode>,
+    },
+    Edges {
+        edges: Vec<GraphEdge>,
     },
     GraphsPage {
         page: u32,
@@ -117,6 +172,10 @@ impl GraphOperations {
                 let graph = self.replace_graph(actor, graph_id, payload).await?;
                 Ok(GraphOperationResult::Graph { graph })
             }
+            GraphOperation::ReplaceGuarded { graph_id, payload } => {
+                let graph = self.replace_graph_guarded(actor, graph_id, payload).await?;
+                Ok(GraphOperationResult::Graph { graph })
+            }
             GraphOperation::Get { graph_id } => {
                 let graph = self.get_graph(actor, graph_id).await?;
                 Ok(GraphOperationResult::Graph { graph })
@@ -132,6 +191,62 @@ impl GraphOperations {
             GraphOperation::Delete { graph_id } => {
                 self.delete_graph(actor, graph_id).await?;
                 Ok(GraphOperationResult::Deleted)
+            }
+            GraphOperation::AddEdge { graph_id, payload } => {
+                let graph = self.add_edge(actor, graph_id, payload).await?;
+                Ok(GraphOperationResult::Graph { graph })
+            }
+            GraphOperation::RemoveEdge { graph_id, payload } => {
+                let graph = self.remove_edge(actor, graph_id, payload).await?;
+                Ok(GraphOperationResult::Graph { graph })
+            }
+            GraphOperation::UpsertEdgeMetadata { graph_id, payload } => {
+                let graph = self.upsert_edge_metadata(actor, graph_id, payload).await?;
+                Ok(GraphOperationResult::Graph { graph })
+            }
+            GraphOperation::UpsertNode { graph_id, payload } => {
+                let graph = self.upsert_node(actor, graph_id, payload).await?;
+                Ok(GraphOperationResult::Graph { graph })
+            }
+            GraphOperation::RemoveNode { graph_id, payload } => {
+                let graph = self.remove_node(actor, graph_id, payload).await?;
+                Ok(GraphOperationResult::Graph { graph })
+            }
+            GraphOperation::FindNodeByExternalId {
+                graph_id,
+                external_id,
+            } => {
+                let node = self
+                    .find_node_by_external_id(actor, graph_id, &external_id)
+                    .await?;
+                Ok(GraphOperationResult::Node { node })
+            }
+            GraphOperation::QueryNodesByMetadata { graph_id, payload } => {
+                let nodes = self
+                    .query_nodes_by_metadata(actor, graph_id, &payload.metadata_contains)
+                    .await?;
+                Ok(GraphOperationResult::Nodes { nodes })
+            }
+            GraphOperation::QueryEdgesByMetadata { graph_id, payload } => {
+                let edges = self
+                    .query_edges_by_metadata(actor, graph_id, &payload.metadata_contains)
+                    .await?;
+                Ok(GraphOperationResult::Edges { edges })
+            }
+            GraphOperation::IncidentEdgesForNode { graph_id, node_id } => {
+                let edges = self
+                    .incident_edges_for_node(actor, graph_id, node_id)
+                    .await?;
+                Ok(GraphOperationResult::Edges { edges })
+            }
+            GraphOperation::IncidentEdgesForExternalId {
+                graph_id,
+                external_id,
+            } => {
+                let edges = self
+                    .incident_edges_for_external_id(actor, graph_id, &external_id)
+                    .await?;
+                Ok(GraphOperationResult::Edges { edges })
             }
             GraphOperation::GetGroupPermissions { group_id } => {
                 let permissions = self.get_group_permissions(actor, group_id).await?;
@@ -198,6 +313,23 @@ impl GraphOperations {
         .await
     }
 
+    pub async fn replace_graph_guarded(
+        &self,
+        actor: UserId,
+        graph_id: GraphId,
+        payload: GuardedUpdateGraphPayload,
+    ) -> Result<DirectedGraph> {
+        db::update_graph_with_guard(
+            &self.pool,
+            actor,
+            graph_id,
+            payload.graph,
+            payload.expected_updated_at,
+            permissions::graph_update_access_roles(),
+        )
+        .await
+    }
+
     pub async fn get_graph(&self, actor: UserId, graph_id: GraphId) -> Result<DirectedGraph> {
         db::get_graph(
             &self.pool,
@@ -231,6 +363,176 @@ impl GraphOperations {
             actor,
             graph_id,
             permissions::graph_delete_access_roles(),
+        )
+        .await
+    }
+
+    pub async fn add_edge(
+        &self,
+        actor: UserId,
+        graph_id: GraphId,
+        payload: AddEdgePayload,
+    ) -> Result<DirectedGraph> {
+        db::add_edge(
+            &self.pool,
+            actor,
+            graph_id,
+            payload,
+            permissions::graph_update_access_roles(),
+        )
+        .await
+    }
+
+    pub async fn remove_edge(
+        &self,
+        actor: UserId,
+        graph_id: GraphId,
+        payload: RemoveEdgePayload,
+    ) -> Result<DirectedGraph> {
+        db::remove_edge(
+            &self.pool,
+            actor,
+            graph_id,
+            payload,
+            permissions::graph_update_access_roles(),
+        )
+        .await
+    }
+
+    pub async fn upsert_edge_metadata(
+        &self,
+        actor: UserId,
+        graph_id: GraphId,
+        payload: UpsertEdgeMetadataPayload,
+    ) -> Result<DirectedGraph> {
+        db::upsert_edge_metadata(
+            &self.pool,
+            actor,
+            graph_id,
+            payload,
+            permissions::graph_update_access_roles(),
+        )
+        .await
+    }
+
+    pub async fn upsert_node(
+        &self,
+        actor: UserId,
+        graph_id: GraphId,
+        payload: UpsertNodePayload,
+    ) -> Result<DirectedGraph> {
+        db::upsert_node(
+            &self.pool,
+            actor,
+            graph_id,
+            payload,
+            permissions::graph_update_access_roles(),
+        )
+        .await
+    }
+
+    pub async fn remove_node(
+        &self,
+        actor: UserId,
+        graph_id: GraphId,
+        payload: RemoveNodePayload,
+    ) -> Result<DirectedGraph> {
+        db::remove_node(
+            &self.pool,
+            actor,
+            graph_id,
+            payload,
+            permissions::graph_update_access_roles(),
+        )
+        .await
+    }
+
+    pub async fn find_node_by_external_id(
+        &self,
+        actor: UserId,
+        graph_id: GraphId,
+        external_id: &str,
+    ) -> Result<GraphNode> {
+        db::find_node_by_external_id(
+            &self.pool,
+            actor,
+            graph_id,
+            external_id,
+            permissions::graph_read_access_roles(),
+        )
+        .await?
+        .ok_or_else(|| {
+            LibError::not_found(
+                "Node not found",
+                anyhow!(
+                    "external_id '{}' not found in graph {}",
+                    external_id,
+                    graph_id
+                ),
+            )
+        })
+    }
+
+    pub async fn query_nodes_by_metadata(
+        &self,
+        actor: UserId,
+        graph_id: GraphId,
+        metadata_contains: &Value,
+    ) -> Result<Vec<GraphNode>> {
+        db::list_graph_nodes_by_metadata(
+            &self.pool,
+            actor,
+            graph_id,
+            metadata_contains,
+            permissions::graph_read_access_roles(),
+        )
+        .await
+    }
+
+    pub async fn query_edges_by_metadata(
+        &self,
+        actor: UserId,
+        graph_id: GraphId,
+        metadata_contains: &Value,
+    ) -> Result<Vec<GraphEdge>> {
+        db::list_graph_edges_by_metadata(
+            &self.pool,
+            actor,
+            graph_id,
+            metadata_contains,
+            permissions::graph_read_access_roles(),
+        )
+        .await
+    }
+
+    pub async fn incident_edges_for_node(
+        &self,
+        actor: UserId,
+        graph_id: GraphId,
+        node_id: GraphNodeId,
+    ) -> Result<Vec<GraphEdge>> {
+        db::list_incident_edges_for_node(
+            &self.pool,
+            actor,
+            graph_id,
+            node_id,
+            permissions::graph_read_access_roles(),
+        )
+        .await
+    }
+
+    pub async fn incident_edges_for_external_id(
+        &self,
+        actor: UserId,
+        graph_id: GraphId,
+        external_id: &str,
+    ) -> Result<Vec<GraphEdge>> {
+        db::list_incident_edges_for_external_id(
+            &self.pool,
+            actor,
+            graph_id,
+            external_id,
+            permissions::graph_read_access_roles(),
         )
         .await
     }

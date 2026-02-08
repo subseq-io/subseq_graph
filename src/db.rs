@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 
 use anyhow::anyhow;
+use chrono::NaiveDateTime;
 use once_cell::sync::Lazy;
+use serde_json::{Value, json};
 use sqlx::migrate::{MigrateError, Migrator};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
@@ -11,8 +13,10 @@ use subseq_auth::user_id::UserId;
 
 use crate::error::{LibError, Result};
 use crate::models::{
-    CreateGraphPayload, DirectedGraph, GraphDefinition, GraphEdge, GraphId, GraphKind, GraphNode,
-    GraphNodeId, GraphSummary, UpdateGraphPayload,
+    AddEdgePayload, CreateGraphPayload, DirectedGraph, GraphDefinition, GraphDeltaCommand,
+    GraphDeltaOperation, GraphEdge, GraphId, GraphKind, GraphNode, GraphNodeId, GraphSummary,
+    RemoveEdgePayload, RemoveNodePayload, UpdateGraphPayload, UpsertEdgeMetadataPayload,
+    UpsertNodePayload,
 };
 use crate::permissions;
 
@@ -401,6 +405,224 @@ async fn load_accessible_graph(
     }
 }
 
+async fn load_accessible_graph_for_update_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    pool: &PgPool,
+    actor: UserId,
+    graph_id: GraphId,
+    group_required_roles: &[&str],
+    expected_updated_at: Option<NaiveDateTime>,
+) -> Result<GraphRow> {
+    let normalized_roles = normalize_required_roles(group_required_roles)?;
+
+    let row = sqlx::query_as::<_, GraphRow>(
+        r#"
+        SELECT
+            g.id,
+            g.owner_user_id,
+            g.owner_group_id,
+            g.kind,
+            g.name,
+            g.description,
+            g.metadata,
+            g.created_at,
+            g.updated_at
+        FROM graph.graphs g
+        WHERE g.id = $1
+          AND (
+              (g.owner_group_id IS NULL AND g.owner_user_id = $2)
+              OR (
+                  g.owner_group_id IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM auth.group_memberships gm
+                      JOIN auth.groups grp
+                        ON grp.id = gm.group_id
+                      JOIN auth.users usr
+                        ON usr.id = gm.user_id
+                    WHERE gm.group_id = g.owner_group_id
+                      AND gm.user_id = $2
+                      AND grp.active = TRUE
+                      AND usr.active = TRUE
+                      AND (
+                            EXISTS (
+                                SELECT 1
+                                FROM auth.user_roles ur
+                                WHERE ur.user_id = gm.user_id
+                                  AND ur.scope = $3
+                                  AND ur.scope_id IN (gm.group_id::text, $4)
+                                  AND ur.role_name = ANY($5)
+                            )
+                            OR EXISTS (
+                                SELECT 1
+                                FROM auth.group_roles gr
+                                WHERE gr.group_id = gm.group_id
+                                  AND gr.scope = $3
+                                  AND gr.scope_id = gm.group_id::text
+                                  AND gr.role_name = ANY($5)
+                            )
+                        )
+                  )
+              )
+          )
+        LIMIT 1
+        FOR UPDATE
+        "#,
+    )
+    .bind(graph_id.0)
+    .bind(actor.0)
+    .bind(permissions::graph_role_scope())
+    .bind(permissions::graph_role_scope_id_global())
+    .bind(&normalized_roles)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|err| db_err("Failed to query graph", err))?;
+
+    let Some(row) = row else {
+        return if graph_exists(pool, graph_id).await? {
+            let context = load_graph_access_context(pool, graph_id).await?;
+            Err(graph_access_denied_error(
+                actor,
+                graph_id,
+                context,
+                &normalized_roles,
+            ))
+        } else {
+            Err(LibError::not_found(
+                "Graph not found",
+                anyhow!("graph {} not found", graph_id),
+            ))
+        };
+    };
+
+    if let Some(expected_updated_at) = expected_updated_at {
+        if row.updated_at != expected_updated_at {
+            return Err(LibError::conflict(
+                "stale_graph_update",
+                "Graph has changed since it was last read",
+                anyhow!(
+                    "optimistic concurrency check failed for graph {}; expected updated_at {}, actual {}",
+                    graph_id,
+                    expected_updated_at,
+                    row.updated_at
+                ),
+            ));
+        }
+    }
+
+    Ok(row)
+}
+
+async fn load_graph_nodes_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    graph_id: GraphId,
+) -> Result<Vec<GraphNode>> {
+    let rows = sqlx::query_as::<_, GraphNodeRow>(
+        r#"
+        SELECT id, label, metadata
+        FROM graph.nodes
+        WHERE graph_id = $1
+        ORDER BY id ASC
+        "#,
+    )
+    .bind(graph_id.0)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|err| db_err("Failed to query graph nodes", err))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|node| GraphNode {
+            id: GraphNodeId(node.id),
+            label: node.label,
+            metadata: node.metadata,
+        })
+        .collect())
+}
+
+async fn load_graph_edges_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    graph_id: GraphId,
+) -> Result<Vec<GraphEdge>> {
+    let rows = sqlx::query_as::<_, GraphEdgeRow>(
+        r#"
+        SELECT from_node_id, to_node_id, metadata
+        FROM graph.edges
+        WHERE graph_id = $1
+        ORDER BY from_node_id ASC, to_node_id ASC
+        "#,
+    )
+    .bind(graph_id.0)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|err| db_err("Failed to query graph edges", err))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|edge| GraphEdge {
+            from_node_id: GraphNodeId(edge.from_node_id),
+            to_node_id: GraphNodeId(edge.to_node_id),
+            metadata: edge.metadata,
+        })
+        .collect())
+}
+
+fn update_graph_definition_node(
+    nodes: &mut Vec<GraphNode>,
+    payload: &UpsertNodePayload,
+) -> Result<(GraphNodeId, bool)> {
+    let label = payload.label.trim().to_string();
+    if label.is_empty() {
+        return Err(LibError::invalid(
+            "Node label is required",
+            anyhow!("empty node label"),
+        ));
+    }
+
+    if let Some(node_id) = payload.node_id {
+        if let Some(node) = nodes.iter_mut().find(|node| node.id == node_id) {
+            node.label = label;
+            if let Some(metadata) = &payload.metadata {
+                node.metadata = metadata.clone();
+            }
+            Ok((node_id, false))
+        } else {
+            nodes.push(GraphNode {
+                id: node_id,
+                label,
+                metadata: payload.metadata.clone().unwrap_or_else(|| json!({})),
+            });
+            Ok((node_id, true))
+        }
+    } else {
+        let new_id = GraphNodeId(Uuid::new_v4());
+        nodes.push(GraphNode {
+            id: new_id,
+            label,
+            metadata: payload.metadata.clone().unwrap_or_else(|| json!({})),
+        });
+        Ok((new_id, true))
+    }
+}
+
+async fn touch_graph_updated_at_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    graph_id: GraphId,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE graph.graphs
+        SET updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+        "#,
+    )
+    .bind(graph_id.0)
+    .execute(&mut **tx)
+    .await
+    .map_err(|err| db_err("Failed to update graph timestamp", err))?;
+    Ok(())
+}
+
 async fn write_graph_contents(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     graph_id: GraphId,
@@ -782,6 +1004,783 @@ pub async fn update_graph(
     get_graph(pool, actor, graph_id, group_update_roles).await
 }
 
+fn invariant_violation_error(
+    kind: GraphKind,
+    violations: Vec<crate::models::GraphInvariantViolation>,
+) -> LibError {
+    let first = violations
+        .first()
+        .expect("invariant_violation_error requires at least one violation");
+    LibError::invalid_with_code(
+        first.error_code(kind),
+        first.public_message(kind),
+        anyhow!(
+            "graph invariant violation for kind {}: {:?}",
+            kind.as_db_value(),
+            violations
+        ),
+    )
+}
+
+pub async fn update_graph_with_guard(
+    pool: &PgPool,
+    actor: UserId,
+    graph_id: GraphId,
+    payload: UpdateGraphPayload,
+    expected_updated_at: Option<NaiveDateTime>,
+    group_update_roles: &[&str],
+) -> Result<DirectedGraph> {
+    let definition = payload.normalize()?;
+    crate::invariants::ensure_graph_invariants(
+        definition.kind,
+        &definition.nodes,
+        &definition.edges,
+    )?;
+
+    if let Some(group_id) = definition.owner_group_id {
+        ensure_group_permission(
+            pool,
+            actor,
+            group_id,
+            group_update_roles,
+            "You do not have permission to update graphs for this group",
+        )
+        .await?;
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|err| db_err("Failed to start transaction", err))?;
+
+    let _locked = load_accessible_graph_for_update_tx(
+        &mut tx,
+        pool,
+        actor,
+        graph_id,
+        group_update_roles,
+        expected_updated_at,
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+        UPDATE graph.graphs
+        SET owner_group_id = $1,
+            kind = $2,
+            name = $3,
+            description = $4,
+            metadata = $5,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $6
+        "#,
+    )
+    .bind(definition.owner_group_id.map(|id| id.0))
+    .bind(definition.kind.as_db_value())
+    .bind(&definition.name)
+    .bind(&definition.description)
+    .bind(&definition.metadata)
+    .bind(graph_id.0)
+    .execute(&mut *tx)
+    .await
+    .map_err(|err| db_err("Failed to update graph", err))?;
+
+    sqlx::query(
+        r#"
+        DELETE FROM graph.edges
+        WHERE graph_id = $1
+        "#,
+    )
+    .bind(graph_id.0)
+    .execute(&mut *tx)
+    .await
+    .map_err(|err| db_err("Failed to replace graph edges", err))?;
+
+    sqlx::query(
+        r#"
+        DELETE FROM graph.nodes
+        WHERE graph_id = $1
+        "#,
+    )
+    .bind(graph_id.0)
+    .execute(&mut *tx)
+    .await
+    .map_err(|err| db_err("Failed to replace graph nodes", err))?;
+
+    write_graph_contents(&mut tx, graph_id, &definition).await?;
+
+    tx.commit()
+        .await
+        .map_err(|err| db_err("Failed to commit transaction", err))?;
+
+    get_graph(pool, actor, graph_id, group_update_roles).await
+}
+
+pub async fn add_edge_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    pool: &PgPool,
+    actor: UserId,
+    graph_id: GraphId,
+    payload: AddEdgePayload,
+    group_update_roles: &[&str],
+) -> Result<()> {
+    let graph = load_accessible_graph_for_update_tx(
+        tx,
+        pool,
+        actor,
+        graph_id,
+        group_update_roles,
+        payload.expected_updated_at,
+    )
+    .await?;
+    let kind = GraphKind::from_db_value(&graph.kind).ok_or_else(|| {
+        LibError::database(
+            "Failed to decode graph kind",
+            anyhow!("unknown graph kind value '{}'", graph.kind),
+        )
+    })?;
+
+    let nodes = load_graph_nodes_tx(tx, graph_id).await?;
+    let edges = load_graph_edges_tx(tx, graph_id).await?;
+    let index = crate::invariants::GraphMutationIndex::new(kind, &nodes, &edges);
+    let violations = index.would_add_edge_violations(payload.from_node_id, payload.to_node_id);
+    if !violations.is_empty() {
+        return Err(invariant_violation_error(kind, violations));
+    }
+
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO graph.edges (graph_id, from_node_id, to_node_id, metadata)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(graph_id.0)
+    .bind(payload.from_node_id.0)
+    .bind(payload.to_node_id.0)
+    .bind(payload.metadata.unwrap_or_else(|| json!({})))
+    .execute(&mut **tx)
+    .await
+    .map_err(|err| db_err("Failed to add graph edge", err))?;
+
+    if inserted.rows_affected() == 0 {
+        return Err(LibError::invalid(
+            "Edge already exists in graph",
+            anyhow!(
+                "edge {} -> {} already exists in graph {}",
+                payload.from_node_id,
+                payload.to_node_id,
+                graph_id
+            ),
+        ));
+    }
+
+    touch_graph_updated_at_tx(tx, graph_id).await
+}
+
+pub async fn remove_edge_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    pool: &PgPool,
+    actor: UserId,
+    graph_id: GraphId,
+    payload: RemoveEdgePayload,
+    group_update_roles: &[&str],
+) -> Result<()> {
+    let graph = load_accessible_graph_for_update_tx(
+        tx,
+        pool,
+        actor,
+        graph_id,
+        group_update_roles,
+        payload.expected_updated_at,
+    )
+    .await?;
+    let kind = GraphKind::from_db_value(&graph.kind).ok_or_else(|| {
+        LibError::database(
+            "Failed to decode graph kind",
+            anyhow!("unknown graph kind value '{}'", graph.kind),
+        )
+    })?;
+
+    let nodes = load_graph_nodes_tx(tx, graph_id).await?;
+    let edges = load_graph_edges_tx(tx, graph_id).await?;
+    if !edges.iter().any(|edge| {
+        edge.from_node_id == payload.from_node_id && edge.to_node_id == payload.to_node_id
+    }) {
+        return Err(LibError::not_found(
+            "Edge not found",
+            anyhow!(
+                "edge {} -> {} not found in graph {}",
+                payload.from_node_id,
+                payload.to_node_id,
+                graph_id
+            ),
+        ));
+    }
+
+    let index = crate::invariants::GraphMutationIndex::new(kind, &nodes, &edges);
+    let violations = index.would_remove_edge_violations(payload.from_node_id, payload.to_node_id);
+    if !violations.is_empty() {
+        return Err(invariant_violation_error(kind, violations));
+    }
+
+    sqlx::query(
+        r#"
+        DELETE FROM graph.edges
+        WHERE graph_id = $1
+          AND from_node_id = $2
+          AND to_node_id = $3
+        "#,
+    )
+    .bind(graph_id.0)
+    .bind(payload.from_node_id.0)
+    .bind(payload.to_node_id.0)
+    .execute(&mut **tx)
+    .await
+    .map_err(|err| db_err("Failed to remove graph edge", err))?;
+
+    touch_graph_updated_at_tx(tx, graph_id).await
+}
+
+pub async fn upsert_edge_metadata_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    pool: &PgPool,
+    actor: UserId,
+    graph_id: GraphId,
+    payload: UpsertEdgeMetadataPayload,
+    group_update_roles: &[&str],
+) -> Result<()> {
+    let graph = load_accessible_graph_for_update_tx(
+        tx,
+        pool,
+        actor,
+        graph_id,
+        group_update_roles,
+        payload.expected_updated_at,
+    )
+    .await?;
+    let kind = GraphKind::from_db_value(&graph.kind).ok_or_else(|| {
+        LibError::database(
+            "Failed to decode graph kind",
+            anyhow!("unknown graph kind value '{}'", graph.kind),
+        )
+    })?;
+
+    let nodes = load_graph_nodes_tx(tx, graph_id).await?;
+    let edges = load_graph_edges_tx(tx, graph_id).await?;
+    let edge_exists = edges.iter().any(|edge| {
+        edge.from_node_id == payload.from_node_id && edge.to_node_id == payload.to_node_id
+    });
+    if !edge_exists {
+        let index = crate::invariants::GraphMutationIndex::new(kind, &nodes, &edges);
+        let violations = index.would_add_edge_violations(payload.from_node_id, payload.to_node_id);
+        if !violations.is_empty() {
+            return Err(invariant_violation_error(kind, violations));
+        }
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO graph.edges (graph_id, from_node_id, to_node_id, metadata)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (graph_id, from_node_id, to_node_id)
+        DO UPDATE SET metadata = EXCLUDED.metadata
+        "#,
+    )
+    .bind(graph_id.0)
+    .bind(payload.from_node_id.0)
+    .bind(payload.to_node_id.0)
+    .bind(payload.metadata)
+    .execute(&mut **tx)
+    .await
+    .map_err(|err| db_err("Failed to upsert graph edge metadata", err))?;
+
+    touch_graph_updated_at_tx(tx, graph_id).await
+}
+
+pub async fn upsert_node_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    pool: &PgPool,
+    actor: UserId,
+    graph_id: GraphId,
+    payload: UpsertNodePayload,
+    group_update_roles: &[&str],
+) -> Result<GraphNodeId> {
+    let graph = load_accessible_graph_for_update_tx(
+        tx,
+        pool,
+        actor,
+        graph_id,
+        group_update_roles,
+        payload.expected_updated_at,
+    )
+    .await?;
+    let kind = GraphKind::from_db_value(&graph.kind).ok_or_else(|| {
+        LibError::database(
+            "Failed to decode graph kind",
+            anyhow!("unknown graph kind value '{}'", graph.kind),
+        )
+    })?;
+
+    let mut nodes = load_graph_nodes_tx(tx, graph_id).await?;
+    let edges = load_graph_edges_tx(tx, graph_id).await?;
+    let (node_id, inserted) = update_graph_definition_node(&mut nodes, &payload)?;
+    let violations = crate::invariants::graph_invariant_violations(kind, &nodes, &edges);
+    if !violations.is_empty() {
+        return Err(invariant_violation_error(kind, violations));
+    }
+
+    let (label, metadata) = nodes
+        .iter()
+        .find(|node| node.id == node_id)
+        .map(|node| (node.label.clone(), node.metadata.clone()))
+        .expect("updated node should exist");
+
+    if inserted {
+        sqlx::query(
+            r#"
+            INSERT INTO graph.nodes (id, graph_id, label, metadata)
+            VALUES ($1, $2, $3, $4)
+            "#,
+        )
+        .bind(node_id.0)
+        .bind(graph_id.0)
+        .bind(label)
+        .bind(metadata)
+        .execute(&mut **tx)
+        .await
+        .map_err(|err| db_err("Failed to insert graph node", err))?;
+    } else {
+        sqlx::query(
+            r#"
+            UPDATE graph.nodes
+            SET label = $1,
+                metadata = $2
+            WHERE graph_id = $3
+              AND id = $4
+            "#,
+        )
+        .bind(label)
+        .bind(metadata)
+        .bind(graph_id.0)
+        .bind(node_id.0)
+        .execute(&mut **tx)
+        .await
+        .map_err(|err| db_err("Failed to update graph node", err))?;
+    }
+
+    touch_graph_updated_at_tx(tx, graph_id).await?;
+    Ok(node_id)
+}
+
+pub async fn remove_node_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    pool: &PgPool,
+    actor: UserId,
+    graph_id: GraphId,
+    payload: RemoveNodePayload,
+    group_update_roles: &[&str],
+) -> Result<()> {
+    let graph = load_accessible_graph_for_update_tx(
+        tx,
+        pool,
+        actor,
+        graph_id,
+        group_update_roles,
+        payload.expected_updated_at,
+    )
+    .await?;
+    let kind = GraphKind::from_db_value(&graph.kind).ok_or_else(|| {
+        LibError::database(
+            "Failed to decode graph kind",
+            anyhow!("unknown graph kind value '{}'", graph.kind),
+        )
+    })?;
+
+    let mut nodes = load_graph_nodes_tx(tx, graph_id).await?;
+    let mut edges = load_graph_edges_tx(tx, graph_id).await?;
+    if !nodes.iter().any(|node| node.id == payload.node_id) {
+        return Err(LibError::not_found(
+            "Node not found",
+            anyhow!("node {} not found in graph {}", payload.node_id, graph_id),
+        ));
+    }
+
+    nodes.retain(|node| node.id != payload.node_id);
+    if nodes.is_empty() {
+        return Err(LibError::invalid(
+            "Graph must contain at least one node",
+            anyhow!(
+                "removing node {} would empty graph {}",
+                payload.node_id,
+                graph_id
+            ),
+        ));
+    }
+    edges.retain(|edge| edge.from_node_id != payload.node_id && edge.to_node_id != payload.node_id);
+    let violations = crate::invariants::graph_invariant_violations(kind, &nodes, &edges);
+    if !violations.is_empty() {
+        return Err(invariant_violation_error(kind, violations));
+    }
+
+    sqlx::query(
+        r#"
+        DELETE FROM graph.nodes
+        WHERE graph_id = $1
+          AND id = $2
+        "#,
+    )
+    .bind(graph_id.0)
+    .bind(payload.node_id.0)
+    .execute(&mut **tx)
+    .await
+    .map_err(|err| db_err("Failed to remove graph node", err))?;
+
+    touch_graph_updated_at_tx(tx, graph_id).await
+}
+
+pub async fn add_edge(
+    pool: &PgPool,
+    actor: UserId,
+    graph_id: GraphId,
+    payload: AddEdgePayload,
+    group_update_roles: &[&str],
+) -> Result<DirectedGraph> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|err| db_err("Failed to start transaction", err))?;
+    add_edge_tx(&mut tx, pool, actor, graph_id, payload, group_update_roles).await?;
+    tx.commit()
+        .await
+        .map_err(|err| db_err("Failed to commit transaction", err))?;
+    get_graph(pool, actor, graph_id, group_update_roles).await
+}
+
+pub async fn remove_edge(
+    pool: &PgPool,
+    actor: UserId,
+    graph_id: GraphId,
+    payload: RemoveEdgePayload,
+    group_update_roles: &[&str],
+) -> Result<DirectedGraph> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|err| db_err("Failed to start transaction", err))?;
+    remove_edge_tx(&mut tx, pool, actor, graph_id, payload, group_update_roles).await?;
+    tx.commit()
+        .await
+        .map_err(|err| db_err("Failed to commit transaction", err))?;
+    get_graph(pool, actor, graph_id, group_update_roles).await
+}
+
+pub async fn upsert_edge_metadata(
+    pool: &PgPool,
+    actor: UserId,
+    graph_id: GraphId,
+    payload: UpsertEdgeMetadataPayload,
+    group_update_roles: &[&str],
+) -> Result<DirectedGraph> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|err| db_err("Failed to start transaction", err))?;
+    upsert_edge_metadata_tx(&mut tx, pool, actor, graph_id, payload, group_update_roles).await?;
+    tx.commit()
+        .await
+        .map_err(|err| db_err("Failed to commit transaction", err))?;
+    get_graph(pool, actor, graph_id, group_update_roles).await
+}
+
+pub async fn upsert_node(
+    pool: &PgPool,
+    actor: UserId,
+    graph_id: GraphId,
+    payload: UpsertNodePayload,
+    group_update_roles: &[&str],
+) -> Result<DirectedGraph> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|err| db_err("Failed to start transaction", err))?;
+    upsert_node_tx(&mut tx, pool, actor, graph_id, payload, group_update_roles).await?;
+    tx.commit()
+        .await
+        .map_err(|err| db_err("Failed to commit transaction", err))?;
+    get_graph(pool, actor, graph_id, group_update_roles).await
+}
+
+pub async fn remove_node(
+    pool: &PgPool,
+    actor: UserId,
+    graph_id: GraphId,
+    payload: RemoveNodePayload,
+    group_update_roles: &[&str],
+) -> Result<DirectedGraph> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|err| db_err("Failed to start transaction", err))?;
+    remove_node_tx(&mut tx, pool, actor, graph_id, payload, group_update_roles).await?;
+    tx.commit()
+        .await
+        .map_err(|err| db_err("Failed to commit transaction", err))?;
+    get_graph(pool, actor, graph_id, group_update_roles).await
+}
+
+pub async fn apply_graph_delta_batch_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    pool: &PgPool,
+    actor: UserId,
+    commands: &[GraphDeltaCommand],
+    group_update_roles: &[&str],
+) -> Result<()> {
+    for command in commands {
+        match &command.operation {
+            GraphDeltaOperation::AddEdge {
+                from_node_id,
+                to_node_id,
+                metadata,
+            } => {
+                add_edge_tx(
+                    tx,
+                    pool,
+                    actor,
+                    command.graph_id,
+                    AddEdgePayload {
+                        from_node_id: *from_node_id,
+                        to_node_id: *to_node_id,
+                        metadata: metadata.clone(),
+                        expected_updated_at: command.expected_updated_at,
+                    },
+                    group_update_roles,
+                )
+                .await?;
+            }
+            GraphDeltaOperation::RemoveEdge {
+                from_node_id,
+                to_node_id,
+            } => {
+                remove_edge_tx(
+                    tx,
+                    pool,
+                    actor,
+                    command.graph_id,
+                    RemoveEdgePayload {
+                        from_node_id: *from_node_id,
+                        to_node_id: *to_node_id,
+                        expected_updated_at: command.expected_updated_at,
+                    },
+                    group_update_roles,
+                )
+                .await?;
+            }
+            GraphDeltaOperation::UpsertEdgeMetadata {
+                from_node_id,
+                to_node_id,
+                metadata,
+            } => {
+                upsert_edge_metadata_tx(
+                    tx,
+                    pool,
+                    actor,
+                    command.graph_id,
+                    UpsertEdgeMetadataPayload {
+                        from_node_id: *from_node_id,
+                        to_node_id: *to_node_id,
+                        metadata: metadata.clone(),
+                        expected_updated_at: command.expected_updated_at,
+                    },
+                    group_update_roles,
+                )
+                .await?;
+            }
+            GraphDeltaOperation::UpsertNode {
+                node_id,
+                label,
+                metadata,
+            } => {
+                upsert_node_tx(
+                    tx,
+                    pool,
+                    actor,
+                    command.graph_id,
+                    UpsertNodePayload {
+                        node_id: *node_id,
+                        label: label.clone(),
+                        metadata: metadata.clone(),
+                        expected_updated_at: command.expected_updated_at,
+                    },
+                    group_update_roles,
+                )
+                .await?;
+            }
+            GraphDeltaOperation::RemoveNode { node_id } => {
+                remove_node_tx(
+                    tx,
+                    pool,
+                    actor,
+                    command.graph_id,
+                    RemoveNodePayload {
+                        node_id: *node_id,
+                        expected_updated_at: command.expected_updated_at,
+                    },
+                    group_update_roles,
+                )
+                .await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn find_node_by_external_id(
+    pool: &PgPool,
+    actor: UserId,
+    graph_id: GraphId,
+    external_id: &str,
+    group_read_roles: &[&str],
+) -> Result<Option<GraphNode>> {
+    let _ = load_accessible_graph(pool, actor, graph_id, group_read_roles).await?;
+    let node = sqlx::query_as::<_, GraphNodeRow>(
+        r#"
+        SELECT id, label, metadata
+        FROM graph.nodes
+        WHERE graph_id = $1
+          AND metadata ->> 'external_id' = $2
+        LIMIT 1
+        "#,
+    )
+    .bind(graph_id.0)
+    .bind(external_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|err| db_err("Failed to query node by external id", err))?;
+
+    Ok(node.map(|node| GraphNode {
+        id: GraphNodeId(node.id),
+        label: node.label,
+        metadata: node.metadata,
+    }))
+}
+
+pub async fn list_incident_edges_for_node(
+    pool: &PgPool,
+    actor: UserId,
+    graph_id: GraphId,
+    node_id: GraphNodeId,
+    group_read_roles: &[&str],
+) -> Result<Vec<GraphEdge>> {
+    let _ = load_accessible_graph(pool, actor, graph_id, group_read_roles).await?;
+    let edges = sqlx::query_as::<_, GraphEdgeRow>(
+        r#"
+        SELECT from_node_id, to_node_id, metadata
+        FROM graph.edges
+        WHERE graph_id = $1
+          AND (from_node_id = $2 OR to_node_id = $2)
+        ORDER BY from_node_id ASC, to_node_id ASC
+        "#,
+    )
+    .bind(graph_id.0)
+    .bind(node_id.0)
+    .fetch_all(pool)
+    .await
+    .map_err(|err| db_err("Failed to query incident edges", err))?;
+
+    Ok(edges
+        .into_iter()
+        .map(|edge| GraphEdge {
+            from_node_id: GraphNodeId(edge.from_node_id),
+            to_node_id: GraphNodeId(edge.to_node_id),
+            metadata: edge.metadata,
+        })
+        .collect())
+}
+
+pub async fn list_incident_edges_for_external_id(
+    pool: &PgPool,
+    actor: UserId,
+    graph_id: GraphId,
+    external_id: &str,
+    group_read_roles: &[&str],
+) -> Result<Vec<GraphEdge>> {
+    let Some(node) =
+        find_node_by_external_id(pool, actor, graph_id, external_id, group_read_roles).await?
+    else {
+        return Ok(Vec::new());
+    };
+
+    list_incident_edges_for_node(pool, actor, graph_id, node.id, group_read_roles).await
+}
+
+pub async fn list_graph_nodes_by_metadata(
+    pool: &PgPool,
+    actor: UserId,
+    graph_id: GraphId,
+    metadata_contains: &Value,
+    group_read_roles: &[&str],
+) -> Result<Vec<GraphNode>> {
+    let _ = load_accessible_graph(pool, actor, graph_id, group_read_roles).await?;
+    let rows = sqlx::query_as::<_, GraphNodeRow>(
+        r#"
+        SELECT id, label, metadata
+        FROM graph.nodes
+        WHERE graph_id = $1
+          AND metadata @> $2::jsonb
+        ORDER BY id ASC
+        "#,
+    )
+    .bind(graph_id.0)
+    .bind(metadata_contains)
+    .fetch_all(pool)
+    .await
+    .map_err(|err| db_err("Failed to query graph nodes by metadata", err))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| GraphNode {
+            id: GraphNodeId(row.id),
+            label: row.label,
+            metadata: row.metadata,
+        })
+        .collect())
+}
+
+pub async fn list_graph_edges_by_metadata(
+    pool: &PgPool,
+    actor: UserId,
+    graph_id: GraphId,
+    metadata_contains: &Value,
+    group_read_roles: &[&str],
+) -> Result<Vec<GraphEdge>> {
+    let _ = load_accessible_graph(pool, actor, graph_id, group_read_roles).await?;
+    let rows = sqlx::query_as::<_, GraphEdgeRow>(
+        r#"
+        SELECT from_node_id, to_node_id, metadata
+        FROM graph.edges
+        WHERE graph_id = $1
+          AND metadata @> $2::jsonb
+        ORDER BY from_node_id ASC, to_node_id ASC
+        "#,
+    )
+    .bind(graph_id.0)
+    .bind(metadata_contains)
+    .fetch_all(pool)
+    .await
+    .map_err(|err| db_err("Failed to query graph edges by metadata", err))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| GraphEdge {
+            from_node_id: GraphNodeId(row.from_node_id),
+            to_node_id: GraphNodeId(row.to_node_id),
+            metadata: row.metadata,
+        })
+        .collect())
+}
+
 pub async fn delete_graph(
     pool: &PgPool,
     actor: UserId,
@@ -1023,6 +2022,8 @@ pub async fn set_group_allowed_roles(
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
     use subseq_auth::prelude::ApiErrorDetails;
 
@@ -1097,5 +2098,48 @@ mod tests {
         assert_eq!(err.kind, crate::error::ErrorKind::Forbidden);
         assert_eq!(err.code, "forbidden");
         assert!(err.details.is_none());
+    }
+
+    #[test]
+    fn update_graph_definition_node_updates_existing_when_id_matches() {
+        let existing_id = GraphNodeId(Uuid::new_v4());
+        let mut nodes = vec![GraphNode {
+            id: existing_id,
+            label: "old".to_string(),
+            metadata: json!({"a": 1}),
+        }];
+
+        let payload = UpsertNodePayload {
+            node_id: Some(existing_id),
+            label: " updated ".to_string(),
+            metadata: None,
+            expected_updated_at: None,
+        };
+
+        let (node_id, inserted) =
+            update_graph_definition_node(&mut nodes, &payload).expect("update should work");
+        assert_eq!(node_id, existing_id);
+        assert!(!inserted);
+        assert_eq!(nodes[0].label, "updated");
+        assert_eq!(nodes[0].metadata, json!({"a": 1}));
+    }
+
+    #[test]
+    fn update_graph_definition_node_inserts_new_when_missing() {
+        let mut nodes = Vec::new();
+        let explicit_id = GraphNodeId(Uuid::new_v4());
+        let payload = UpsertNodePayload {
+            node_id: Some(explicit_id),
+            label: "new".to_string(),
+            metadata: Some(json!({"ext": "x"})),
+            expected_updated_at: None,
+        };
+
+        let (node_id, inserted) =
+            update_graph_definition_node(&mut nodes, &payload).expect("insert should work");
+        assert_eq!(node_id, explicit_id);
+        assert!(inserted);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].metadata, json!({"ext": "x"}));
     }
 }

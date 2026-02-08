@@ -5,6 +5,7 @@ pub type Result<T> = std::result::Result<T, LibError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
+    Conflict,
     Database,
     Forbidden,
     InvalidInput,
@@ -26,6 +27,16 @@ impl LibError {
         Self {
             kind: ErrorKind::Database,
             code: "database_error",
+            public,
+            details: None,
+            source,
+        }
+    }
+
+    pub fn conflict(code: &'static str, public: &'static str, source: anyhow::Error) -> Self {
+        Self {
+            kind: ErrorKind::Conflict,
+            code,
             public,
             details: None,
             source,

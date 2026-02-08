@@ -214,6 +214,72 @@ Response body:
 }
 ```
 
+## Transactional Delta APIs
+
+Single-mutation write endpoints (all enforce graph invariants and graph update
+permissions):
+
+- `POST /graph/{graph_id}/node/upsert`
+- `POST /graph/{graph_id}/node/remove`
+- `POST /graph/{graph_id}/edge/add`
+- `POST /graph/{graph_id}/edge/remove`
+- `POST /graph/{graph_id}/edge/upsert-metadata`
+
+Each payload supports optional optimistic concurrency:
+
+- `expectedUpdatedAt` (nullable timestamp)
+
+If provided and stale, request fails with conflict:
+
+- `status = 409`
+- `error.code = "stale_graph_update"`
+
+## Task-Centric Lookups
+
+- Node by external ID:
+  - `GET /graph/{graph_id}/node/by-external-id/{external_id}`
+- Incident edges by node ID:
+  - `GET /graph/{graph_id}/edge/incident/node/{node_id}`
+- Incident edges by external ID:
+  - `GET /graph/{graph_id}/edge/incident/external-id/{external_id}`
+
+`external_id` lookup uses `nodes.metadata ->> 'external_id'`.
+
+## Metadata Query APIs
+
+JSONB containment query endpoints:
+
+- `POST /graph/{graph_id}/nodes/query-metadata`
+- `POST /graph/{graph_id}/edges/query-metadata`
+
+Request body:
+
+```json
+{
+  "metadataContains": {
+    "source": "task_service",
+    "status": "open"
+  }
+}
+```
+
+Backed by GIN indexes on node/edge metadata and an expression index on
+`nodes.metadata ->> 'external_id'` for efficient external-id lookups.
+
+## Caller-Owned Transactions
+
+For multi-graph atomic mutation flows, use DB-level transaction variants:
+
+- `add_edge_tx`
+- `remove_edge_tx`
+- `upsert_edge_metadata_tx`
+- `upsert_node_tx`
+- `remove_node_tx`
+- `apply_graph_delta_batch_tx`
+
+Callers can start one SQL transaction and apply mutations across multiple graph
+IDs before a single commit.
+
 Response body:
 
 ```json
