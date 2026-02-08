@@ -5,14 +5,15 @@ pub mod api;
 pub mod db;
 pub mod error;
 pub mod models;
+pub mod permissions;
 
 pub mod prelude {
     pub use crate::algorithms::{adjacency_map, has_cycle, topological_sort};
     #[cfg(feature = "api")]
-    pub use crate::api::{GraphApp, HasGraphPolicyAdminRoles, HasPool};
+    pub use crate::api::{GraphApp, HasPool};
     #[cfg(feature = "sqlx")]
     pub use crate::db::{
-        authorize_group_policy_edit, create_graph, create_graph_tables, delete_graph, get_graph,
+        authorize_group_permission, create_graph, create_graph_tables, delete_graph, get_graph,
         list_graphs, list_group_allowed_roles, set_group_allowed_roles, update_graph,
     };
     pub use crate::error::{ErrorKind, LibError, Result};
@@ -20,6 +21,12 @@ pub mod prelude {
         CreateGraphPayload, DirectedGraph, GraphEdge, GraphId, GraphNode, GraphNodeId,
         GraphSummary, GroupGraphPermissions, ListGraphsQuery, NewGraphEdge, NewGraphNode, Paged,
         UpdateGraphPayload, UpdateGroupGraphPermissionsPayload,
+    };
+    pub use crate::permissions::{
+        all_graph_permission_roles, graph_create_role, graph_delete_role,
+        graph_permissions_read_role, graph_permissions_update_role, graph_read_role,
+        graph_role_scope, graph_role_scope_id_for_group, graph_role_scope_id_global,
+        graph_update_role,
     };
     pub use subseq_auth::group_id::GroupId;
     pub use subseq_auth::user_id::UserId;
