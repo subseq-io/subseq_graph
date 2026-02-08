@@ -113,3 +113,52 @@ pub fn is_graph_permission_role(role_name: &str) -> bool {
         .iter()
         .any(|known| *known == role_name)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use uuid::Uuid;
+
+    use super::*;
+
+    #[test]
+    fn graph_read_access_roles_include_mutating_roles() {
+        let roles: HashSet<&str> = graph_read_access_roles().iter().copied().collect();
+
+        assert!(roles.contains(graph_read_role()));
+        assert!(roles.contains(graph_create_role()));
+        assert!(roles.contains(graph_update_role()));
+        assert!(roles.contains(graph_delete_role()));
+    }
+
+    #[test]
+    fn graph_permissions_read_access_includes_permissions_update() {
+        let roles: HashSet<&str> = graph_permissions_read_access_roles()
+            .iter()
+            .copied()
+            .collect();
+
+        assert!(roles.contains(graph_permissions_read_role()));
+        assert!(roles.contains(graph_permissions_update_role()));
+    }
+
+    #[test]
+    fn graph_scope_id_helpers_match_expected_values() {
+        let group_id = GroupId(Uuid::new_v4());
+
+        assert_eq!(graph_role_scope(), "graph");
+        assert_eq!(graph_role_scope_id_global(), "global");
+        assert_eq!(
+            graph_role_scope_id_for_group(group_id),
+            group_id.to_string()
+        );
+    }
+
+    #[test]
+    fn graph_permission_role_validation_matches_known_values() {
+        assert!(is_graph_permission_role(graph_read_role()));
+        assert!(is_graph_permission_role(graph_permissions_update_role()));
+        assert!(!is_graph_permission_role("graph_super_admin"));
+    }
+}

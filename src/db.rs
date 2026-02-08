@@ -982,3 +982,82 @@ pub async fn set_group_allowed_roles(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use subseq_auth::prelude::ApiErrorDetails;
+
+    #[test]
+    fn normalize_required_roles_trims_and_dedupes() {
+        let roles = normalize_required_roles(&[" graph_read ", "graph_update", "graph_read"])
+            .expect("roles should normalize");
+
+        assert_eq!(
+            roles,
+            vec!["graph_read".to_string(), "graph_update".to_string()]
+        );
+    }
+
+    #[test]
+    fn normalize_required_roles_rejects_empty_sets() {
+        let err = normalize_required_roles(&["", "  "]).expect_err("should reject empty role set");
+
+        assert_eq!(err.kind, crate::error::ErrorKind::Forbidden);
+        assert_eq!(err.code, "forbidden");
+        assert_eq!(err.public, "Graph permissions are not configured");
+    }
+
+    #[test]
+    fn graph_access_denied_error_includes_missing_scope_details_for_group_graphs() {
+        let actor = UserId(Uuid::new_v4());
+        let graph_id = GraphId(Uuid::new_v4());
+        let group_id = Uuid::new_v4();
+        let required_roles = vec!["graph_read".to_string(), "graph_update".to_string()];
+
+        let err = graph_access_denied_error(
+            actor,
+            graph_id,
+            Some(GraphAccessContextRow {
+                owner_group_id: Some(group_id),
+            }),
+            &required_roles,
+        );
+
+        assert_eq!(err.kind, crate::error::ErrorKind::Forbidden);
+        assert_eq!(err.code, "missing_scope_check");
+        assert_eq!(err.public, "You do not have access to this graph");
+        match err.details {
+            Some(ApiErrorDetails::MissingScopeCheck {
+                scope,
+                scope_id,
+                required_any_roles,
+            }) => {
+                assert_eq!(scope, permissions::graph_role_scope());
+                assert_eq!(scope_id, group_id.to_string());
+                assert_eq!(required_any_roles, required_roles);
+            }
+            other => panic!("expected missing scope details, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn graph_access_denied_error_stays_generic_without_group_scope() {
+        let actor = UserId(Uuid::new_v4());
+        let graph_id = GraphId(Uuid::new_v4());
+        let required_roles = vec!["graph_read".to_string()];
+
+        let err = graph_access_denied_error(
+            actor,
+            graph_id,
+            Some(GraphAccessContextRow {
+                owner_group_id: None,
+            }),
+            &required_roles,
+        );
+
+        assert_eq!(err.kind, crate::error::ErrorKind::Forbidden);
+        assert_eq!(err.code, "forbidden");
+        assert!(err.details.is_none());
+    }
+}
