@@ -15,8 +15,9 @@ use crate::error::{LibError, Result};
 use crate::models::{
     AddEdgePayload, CreateGraphPayload, DirectedGraph, GraphDefinition, GraphDeltaCommand,
     GraphDeltaOperation, GraphEdge, GraphId, GraphKind, GraphNode, GraphNodeId, GraphSummary,
-    RemoveEdgePayload, RemoveNodePayload, UpdateGraphPayload, UpsertEdgeMetadataPayload,
-    UpsertNodePayload, api_metadata_to_db_json, db_metadata_to_api_json, normalize_api_metadata,
+    RemoveEdgePayload, RemoveNodePayload, ReparentNodePayload, UpdateGraphPayload,
+    UpsertEdgeMetadataPayload, UpsertNodePayload, api_metadata_to_db_json, db_metadata_to_api_json,
+    normalize_api_metadata,
 };
 use crate::permissions;
 
@@ -626,6 +627,38 @@ fn update_graph_definition_node(
         });
         Ok((new_id, true))
     }
+}
+
+fn apply_reparent_edges(
+    edges: &[GraphEdge],
+    node_id: GraphNodeId,
+    new_parent_node_id: Option<GraphNodeId>,
+    metadata_override: Option<Value>,
+) -> Vec<GraphEdge> {
+    let existing_metadata = new_parent_node_id.and_then(|parent_id| {
+        edges
+            .iter()
+            .find(|edge| edge.from_node_id == parent_id && edge.to_node_id == node_id)
+            .map(|edge| edge.metadata.clone())
+    });
+
+    let mut updated_edges = edges
+        .iter()
+        .filter(|edge| edge.to_node_id != node_id)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if let Some(parent_id) = new_parent_node_id {
+        updated_edges.push(GraphEdge {
+            from_node_id: parent_id,
+            to_node_id: node_id,
+            metadata: metadata_override
+                .or(existing_metadata)
+                .unwrap_or_else(|| Value::Object(Default::default())),
+        });
+    }
+
+    updated_edges
 }
 
 async fn touch_graph_updated_at_tx(
@@ -1482,6 +1515,116 @@ pub async fn remove_node_tx(
     touch_graph_updated_at_tx(tx, graph_id).await
 }
 
+pub async fn reparent_node_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    pool: &PgPool,
+    actor: UserId,
+    graph_id: GraphId,
+    payload: ReparentNodePayload,
+    group_update_roles: &[&str],
+) -> Result<()> {
+    let ReparentNodePayload {
+        node_id,
+        new_parent_node_id,
+        metadata,
+        expected_updated_at,
+    } = payload;
+    if new_parent_node_id.is_none() && metadata.is_some() {
+        return Err(LibError::invalid(
+            "Metadata can only be provided when assigning a parent edge",
+            anyhow!("metadata provided for detach request on node {}", node_id),
+        ));
+    }
+
+    let graph = load_accessible_graph_for_update_tx(
+        tx,
+        pool,
+        actor,
+        graph_id,
+        group_update_roles,
+        expected_updated_at,
+    )
+    .await?;
+    let kind = GraphKind::from_db_value(&graph.kind).ok_or_else(|| {
+        LibError::database(
+            "Failed to decode graph kind",
+            anyhow!("unknown graph kind value '{}'", graph.kind),
+        )
+    })?;
+
+    let nodes = load_graph_nodes_tx(tx, graph_id).await?;
+    let node_ids: HashSet<GraphNodeId> = nodes.iter().map(|node| node.id).collect();
+    if !node_ids.contains(&node_id) {
+        return Err(LibError::not_found(
+            "Node not found",
+            anyhow!("node {} not found in graph {}", node_id, graph_id),
+        ));
+    }
+    if let Some(parent_node_id) = new_parent_node_id {
+        if !node_ids.contains(&parent_node_id) {
+            return Err(LibError::not_found(
+                "Parent node not found",
+                anyhow!(
+                    "parent node {} not found in graph {}",
+                    parent_node_id,
+                    graph_id
+                ),
+            ));
+        }
+    }
+
+    let edges = load_graph_edges_tx(tx, graph_id).await?;
+    let metadata_override = metadata
+        .map(|value| normalize_api_metadata(Some(value)))
+        .transpose()?;
+    let updated_edges =
+        apply_reparent_edges(&edges, node_id, new_parent_node_id, metadata_override);
+    let violations = crate::invariants::graph_invariant_violations(kind, &nodes, &updated_edges);
+    if !violations.is_empty() {
+        return Err(invariant_violation_error(kind, violations));
+    }
+
+    sqlx::query(
+        r#"
+        DELETE FROM graph.edges
+        WHERE graph_id = $1
+          AND to_node_id = $2
+        "#,
+    )
+    .bind(graph_id.0)
+    .bind(node_id.0)
+    .execute(&mut **tx)
+    .await
+    .map_err(|err| db_err("Failed to remove existing parent edge", err))?;
+
+    if let Some(parent_node_id) = new_parent_node_id {
+        let metadata = updated_edges
+            .iter()
+            .find(|edge| edge.from_node_id == parent_node_id && edge.to_node_id == node_id)
+            .map(|edge| edge.metadata.clone())
+            .expect("reparented edge should exist after edge update");
+        let db_metadata = api_metadata_to_db_json(&metadata)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO graph.edges (graph_id, from_node_id, to_node_id, metadata)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (graph_id, from_node_id, to_node_id)
+            DO UPDATE SET metadata = EXCLUDED.metadata
+            "#,
+        )
+        .bind(graph_id.0)
+        .bind(parent_node_id.0)
+        .bind(node_id.0)
+        .bind(db_metadata)
+        .execute(&mut **tx)
+        .await
+        .map_err(|err| db_err("Failed to save reparented edge", err))?;
+    }
+
+    touch_graph_updated_at_tx(tx, graph_id).await
+}
+
 pub async fn add_edge(
     pool: &PgPool,
     actor: UserId,
@@ -1572,6 +1715,24 @@ pub async fn remove_node(
     get_graph(pool, actor, graph_id, group_update_roles).await
 }
 
+pub async fn reparent_node(
+    pool: &PgPool,
+    actor: UserId,
+    graph_id: GraphId,
+    payload: ReparentNodePayload,
+    group_update_roles: &[&str],
+) -> Result<DirectedGraph> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|err| db_err("Failed to start transaction", err))?;
+    reparent_node_tx(&mut tx, pool, actor, graph_id, payload, group_update_roles).await?;
+    tx.commit()
+        .await
+        .map_err(|err| db_err("Failed to commit transaction", err))?;
+    get_graph(pool, actor, graph_id, group_update_roles).await
+}
+
 pub async fn apply_graph_delta_batch_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     pool: &PgPool,
@@ -1652,6 +1813,26 @@ pub async fn apply_graph_delta_batch_tx(
                     UpsertNodePayload {
                         node_id: *node_id,
                         label: label.clone(),
+                        metadata: metadata.clone(),
+                        expected_updated_at: command.expected_updated_at,
+                    },
+                    group_update_roles,
+                )
+                .await?;
+            }
+            GraphDeltaOperation::ReparentNode {
+                node_id,
+                new_parent_node_id,
+                metadata,
+            } => {
+                reparent_node_tx(
+                    tx,
+                    pool,
+                    actor,
+                    command.graph_id,
+                    ReparentNodePayload {
+                        node_id: *node_id,
+                        new_parent_node_id: *new_parent_node_id,
                         metadata: metadata.clone(),
                         expected_updated_at: command.expected_updated_at,
                     },
@@ -2257,5 +2438,155 @@ mod tests {
             err.public,
             "Metadata contains conflicting keys after normalization"
         );
+    }
+
+    #[test]
+    fn apply_reparent_edges_preserves_metadata_when_parent_is_unchanged() {
+        let parent = GraphNodeId(Uuid::new_v4());
+        let child = GraphNodeId(Uuid::new_v4());
+        let other_from = GraphNodeId(Uuid::new_v4());
+        let other_to = GraphNodeId(Uuid::new_v4());
+        let edges = vec![
+            GraphEdge {
+                from_node_id: parent,
+                to_node_id: child,
+                metadata: json!({"weight": 2}),
+            },
+            GraphEdge {
+                from_node_id: other_from,
+                to_node_id: other_to,
+                metadata: json!({"kind": "other"}),
+            },
+        ];
+
+        let updated = apply_reparent_edges(&edges, child, Some(parent), None);
+        assert_eq!(updated.len(), 2);
+        assert!(updated.iter().any(|edge| edge.from_node_id == parent
+            && edge.to_node_id == child
+            && edge.metadata == json!({"weight": 2})));
+        assert!(updated.iter().any(|edge| edge.from_node_id == other_from
+            && edge.to_node_id == other_to
+            && edge.metadata == json!({"kind": "other"})));
+    }
+
+    #[test]
+    fn apply_reparent_edges_can_reparent_tree_without_intermediate_violation() {
+        let root = GraphNodeId(Uuid::new_v4());
+        let a = GraphNodeId(Uuid::new_v4());
+        let b = GraphNodeId(Uuid::new_v4());
+        let c = GraphNodeId(Uuid::new_v4());
+        let nodes = vec![
+            GraphNode {
+                id: root,
+                label: "root".to_string(),
+                metadata: json!({}),
+            },
+            GraphNode {
+                id: a,
+                label: "a".to_string(),
+                metadata: json!({}),
+            },
+            GraphNode {
+                id: b,
+                label: "b".to_string(),
+                metadata: json!({}),
+            },
+            GraphNode {
+                id: c,
+                label: "c".to_string(),
+                metadata: json!({}),
+            },
+        ];
+        let edges = vec![
+            GraphEdge {
+                from_node_id: root,
+                to_node_id: a,
+                metadata: json!({}),
+            },
+            GraphEdge {
+                from_node_id: root,
+                to_node_id: b,
+                metadata: json!({}),
+            },
+            GraphEdge {
+                from_node_id: a,
+                to_node_id: c,
+                metadata: json!({}),
+            },
+        ];
+
+        let updated = apply_reparent_edges(
+            &edges,
+            c,
+            Some(b),
+            Some(json!({"relationType": "subtaskOf"})),
+        );
+        let violations =
+            crate::invariants::graph_invariant_violations(GraphKind::Tree, &nodes, &updated);
+
+        assert!(violations.is_empty());
+        assert!(updated.iter().any(|edge| edge.from_node_id == b
+            && edge.to_node_id == c
+            && edge.metadata == json!({"relationType": "subtaskOf"})));
+    }
+
+    #[test]
+    fn apply_reparent_edges_detach_reports_tree_violations() {
+        let root = GraphNodeId(Uuid::new_v4());
+        let a = GraphNodeId(Uuid::new_v4());
+        let b = GraphNodeId(Uuid::new_v4());
+        let c = GraphNodeId(Uuid::new_v4());
+        let nodes = vec![
+            GraphNode {
+                id: root,
+                label: "root".to_string(),
+                metadata: json!({}),
+            },
+            GraphNode {
+                id: a,
+                label: "a".to_string(),
+                metadata: json!({}),
+            },
+            GraphNode {
+                id: b,
+                label: "b".to_string(),
+                metadata: json!({}),
+            },
+            GraphNode {
+                id: c,
+                label: "c".to_string(),
+                metadata: json!({}),
+            },
+        ];
+        let edges = vec![
+            GraphEdge {
+                from_node_id: root,
+                to_node_id: a,
+                metadata: json!({}),
+            },
+            GraphEdge {
+                from_node_id: root,
+                to_node_id: b,
+                metadata: json!({}),
+            },
+            GraphEdge {
+                from_node_id: a,
+                to_node_id: c,
+                metadata: json!({}),
+            },
+        ];
+
+        let updated = apply_reparent_edges(&edges, c, None, None);
+        let violations =
+            crate::invariants::graph_invariant_violations(GraphKind::Tree, &nodes, &updated);
+
+        assert!(!violations.is_empty());
+        assert!(violations.iter().any(|violation| {
+            matches!(
+                violation,
+                crate::models::GraphInvariantViolation::InvalidRootCount { .. }
+                    | crate::models::GraphInvariantViolation::DisconnectedTree { .. }
+            )
+        }));
     }
 }

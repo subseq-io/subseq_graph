@@ -15,9 +15,9 @@ use crate::error::{ErrorKind, LibError};
 use crate::models::{
     AddEdgePayload, CreateGraphPayload, EdgeMutationCheckResponse, EdgeMutationPayload, GraphId,
     GraphNodeId, GroupGraphPermissions, GuardedUpdateGraphPayload, ListGraphsQuery,
-    MetadataFilterPayload, Paged, RemoveEdgePayload, RemoveNodePayload, UpdateGraphPayload,
-    UpdateGroupGraphPermissionsPayload, UpsertEdgeMetadataPayload, UpsertNodePayload,
-    ValidateGraphEdgesPayload, ValidateGraphEdgesResponse,
+    MetadataFilterPayload, Paged, RemoveEdgePayload, RemoveNodePayload, ReparentNodePayload,
+    UpdateGraphPayload, UpdateGroupGraphPermissionsPayload, UpsertEdgeMetadataPayload,
+    UpsertNodePayload, ValidateGraphEdgesPayload, ValidateGraphEdgesResponse,
 };
 use crate::permissions;
 
@@ -182,6 +182,26 @@ where
     S: GraphApp + Clone + Send + Sync + 'static,
 {
     let graph = db::remove_node(
+        &app.pool(),
+        auth_user.id(),
+        graph_id,
+        payload,
+        permissions::graph_update_access_roles(),
+    )
+    .await?;
+    Ok(Json(graph))
+}
+
+async fn reparent_node_handler<S>(
+    State(app): State<S>,
+    auth_user: AuthenticatedUser,
+    Path(graph_id): Path<GraphId>,
+    Json(payload): Json<ReparentNodePayload>,
+) -> Result<impl IntoResponse, AppError>
+where
+    S: GraphApp + Clone + Send + Sync + 'static,
+{
+    let graph = db::reparent_node(
         &app.pool(),
         auth_user.id(),
         graph_id,
@@ -511,6 +531,7 @@ where
     tracing::info!("Registering route /graph/{{graph_id}}/replace [PUT]");
     tracing::info!("Registering route /graph/{{graph_id}}/node/upsert [POST]");
     tracing::info!("Registering route /graph/{{graph_id}}/node/remove [POST]");
+    tracing::info!("Registering route /graph/{{graph_id}}/node/reparent [POST]");
     tracing::info!("Registering route /graph/{{graph_id}}/edge/add [POST]");
     tracing::info!("Registering route /graph/{{graph_id}}/edge/remove [POST]");
     tracing::info!("Registering route /graph/{{graph_id}}/edge/upsert-metadata [POST]");
@@ -541,6 +562,10 @@ where
         .route(
             "/graph/{graph_id}/node/remove",
             post(remove_node_handler::<S>),
+        )
+        .route(
+            "/graph/{graph_id}/node/reparent",
+            post(reparent_node_handler::<S>),
         )
         .route("/graph/{graph_id}/edge/add", post(add_edge_handler::<S>))
         .route(

@@ -451,6 +451,18 @@ pub struct RemoveNodePayload {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ReparentNodePayload {
+    pub node_id: GraphNodeId,
+    #[serde(default)]
+    pub new_parent_node_id: Option<GraphNodeId>,
+    #[serde(default)]
+    pub metadata: Option<Value>,
+    #[serde(default)]
+    pub expected_updated_at: Option<NaiveDateTime>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AddEdgePayload {
     pub from_node_id: GraphNodeId,
     pub to_node_id: GraphNodeId,
@@ -512,6 +524,11 @@ pub enum GraphDeltaOperation {
     UpsertNode {
         node_id: Option<GraphNodeId>,
         label: String,
+        metadata: Option<Value>,
+    },
+    ReparentNode {
+        node_id: GraphNodeId,
+        new_parent_node_id: Option<GraphNodeId>,
         metadata: Option<Value>,
     },
     RemoveNode {

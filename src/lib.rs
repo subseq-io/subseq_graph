@@ -21,8 +21,9 @@ pub mod prelude {
         list_graph_edges_by_metadata, list_graph_nodes_by_metadata, list_graphs,
         list_group_allowed_roles, list_incident_edges_for_external_id,
         list_incident_edges_for_node, remove_edge, remove_edge_tx, remove_node, remove_node_tx,
-        set_group_allowed_roles, update_graph, update_graph_with_guard, upsert_edge_metadata,
-        upsert_edge_metadata_tx, upsert_node, upsert_node_tx,
+        reparent_node, reparent_node_tx, set_group_allowed_roles, update_graph,
+        update_graph_with_guard, upsert_edge_metadata, upsert_edge_metadata_tx, upsert_node,
+        upsert_node_tx,
     };
     pub use crate::error::{ErrorKind, LibError, Result};
     pub use crate::invariants::{
@@ -34,9 +35,9 @@ pub mod prelude {
         GraphInvariantInput, GraphInvariantViolation, GraphKind, GraphNode, GraphNodeId,
         GraphSummary, GroupGraphPermissions, GuardedUpdateGraphPayload, ListGraphsQuery,
         MetadataFilterPayload, NewGraphEdge, NewGraphNode, Paged, RemoveEdgePayload,
-        RemoveNodePayload, UpdateGraphPayload, UpdateGroupGraphPermissionsPayload,
-        UpsertEdgeMetadataPayload, UpsertNodePayload, ValidateGraphEdgesPayload,
-        ValidateGraphEdgesResponse,
+        RemoveNodePayload, ReparentNodePayload, UpdateGraphPayload,
+        UpdateGroupGraphPermissionsPayload, UpsertEdgeMetadataPayload, UpsertNodePayload,
+        ValidateGraphEdgesPayload, ValidateGraphEdgesResponse,
     };
     #[cfg(feature = "sqlx")]
     pub use crate::operations::{

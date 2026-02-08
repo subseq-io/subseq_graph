@@ -16,8 +16,8 @@ use crate::models::{
     AddEdgePayload, CreateGraphPayload, DirectedGraph, GraphEdge, GraphId, GraphNode, GraphNodeId,
     GraphSummary, GroupGraphPermissions, GuardedUpdateGraphPayload, ListGraphsQuery,
     MetadataFilterPayload, NewGraphEdge, NewGraphNode, Paged, RemoveEdgePayload, RemoveNodePayload,
-    UpdateGraphPayload, UpdateGroupGraphPermissionsPayload, UpsertEdgeMetadataPayload,
-    UpsertNodePayload,
+    ReparentNodePayload, UpdateGraphPayload, UpdateGroupGraphPermissionsPayload,
+    UpsertEdgeMetadataPayload, UpsertNodePayload,
 };
 use crate::permissions;
 
@@ -71,6 +71,10 @@ pub enum GraphOperation {
     RemoveNode {
         graph_id: GraphId,
         payload: RemoveNodePayload,
+    },
+    ReparentNode {
+        graph_id: GraphId,
+        payload: ReparentNodePayload,
     },
     FindNodeByExternalId {
         graph_id: GraphId,
@@ -210,6 +214,10 @@ impl GraphOperations {
             }
             GraphOperation::RemoveNode { graph_id, payload } => {
                 let graph = self.remove_node(actor, graph_id, payload).await?;
+                Ok(GraphOperationResult::Graph { graph })
+            }
+            GraphOperation::ReparentNode { graph_id, payload } => {
+                let graph = self.reparent_node(actor, graph_id, payload).await?;
                 Ok(GraphOperationResult::Graph { graph })
             }
             GraphOperation::FindNodeByExternalId {
@@ -438,6 +446,22 @@ impl GraphOperations {
         payload: RemoveNodePayload,
     ) -> Result<DirectedGraph> {
         db::remove_node(
+            &self.pool,
+            actor,
+            graph_id,
+            payload,
+            permissions::graph_update_access_roles(),
+        )
+        .await
+    }
+
+    pub async fn reparent_node(
+        &self,
+        actor: UserId,
+        graph_id: GraphId,
+        payload: ReparentNodePayload,
+    ) -> Result<DirectedGraph> {
+        db::reparent_node(
             &self.pool,
             actor,
             graph_id,
