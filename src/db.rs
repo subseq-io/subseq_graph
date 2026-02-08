@@ -65,6 +65,11 @@ struct GraphEdgeRow {
     metadata: serde_json::Value,
 }
 
+#[derive(Debug, Clone, FromRow)]
+struct GraphAccessContextRow {
+    owner_group_id: Option<Uuid>,
+}
+
 impl From<GraphSummaryRow> for GraphSummary {
     fn from(value: GraphSummaryRow) -> Self {
         Self {
@@ -160,9 +165,8 @@ async fn user_has_group_permission_role(
     pool: &PgPool,
     actor: UserId,
     group_id: GroupId,
-    required_roles: &[&str],
+    required_roles: &[String],
 ) -> Result<bool> {
-    let required_roles = normalize_required_roles(required_roles)?;
     let group_scope_id = permissions::graph_role_scope_id_for_group(group_id);
 
     let has_role: (bool,) = sqlx::query_as(
@@ -219,6 +223,8 @@ async fn ensure_group_permission(
     required_roles: &[&str],
     denied_message: &'static str,
 ) -> Result<()> {
+    let normalized_roles = normalize_required_roles(required_roles)?;
+
     if !group_exists(pool, group_id).await? {
         return Err(LibError::not_found(
             "Group not found",
@@ -226,11 +232,14 @@ async fn ensure_group_permission(
         ));
     }
 
-    if user_has_group_permission_role(pool, actor, group_id, required_roles).await? {
+    if user_has_group_permission_role(pool, actor, group_id, &normalized_roles).await? {
         Ok(())
     } else {
-        Err(LibError::forbidden(
+        Err(LibError::forbidden_missing_scope(
             denied_message,
+            permissions::graph_role_scope(),
+            permissions::graph_role_scope_id_for_group(group_id),
+            normalized_roles,
             anyhow!(
                 "user {} lacks required graph roles ({}) for group {}",
                 actor,
@@ -239,6 +248,53 @@ async fn ensure_group_permission(
             ),
         ))
     }
+}
+
+async fn load_graph_access_context(
+    pool: &PgPool,
+    graph_id: GraphId,
+) -> Result<Option<GraphAccessContextRow>> {
+    sqlx::query_as::<_, GraphAccessContextRow>(
+        r#"
+        SELECT owner_group_id
+        FROM graph.graphs
+        WHERE id = $1
+        LIMIT 1
+        "#,
+    )
+    .bind(graph_id.0)
+    .fetch_optional(pool)
+    .await
+    .map_err(|err| db_err("Failed to query graph", err))
+}
+
+fn graph_access_denied_error(
+    actor: UserId,
+    graph_id: GraphId,
+    context: Option<GraphAccessContextRow>,
+    required_roles: &[String],
+) -> LibError {
+    if let Some(context) = context {
+        if let Some(group_id) = context.owner_group_id {
+            return LibError::forbidden_missing_scope(
+                "You do not have access to this graph",
+                permissions::graph_role_scope(),
+                permissions::graph_role_scope_id_for_group(GroupId(group_id)),
+                required_roles.to_vec(),
+                anyhow!(
+                    "graph {} access denied for user {}; missing required graph roles in group scope {}",
+                    graph_id,
+                    actor,
+                    group_id
+                ),
+            );
+        }
+    }
+
+    LibError::forbidden(
+        "You do not have access to this graph",
+        anyhow!("graph {} access denied for user {}", graph_id, actor),
+    )
 }
 
 async fn load_accessible_graph(
@@ -305,7 +361,7 @@ async fn load_accessible_graph(
     .bind(actor.0)
     .bind(permissions::graph_role_scope())
     .bind(permissions::graph_role_scope_id_global())
-    .bind(normalized_roles)
+    .bind(&normalized_roles)
     .fetch_optional(pool)
     .await
     .map_err(|err| db_err("Failed to query graph", err))?;
@@ -313,9 +369,12 @@ async fn load_accessible_graph(
     if let Some(row) = row {
         Ok(row)
     } else if graph_exists(pool, graph_id).await? {
-        Err(LibError::forbidden(
-            "You do not have access to this graph",
-            anyhow!("graph {} access denied for user {}", graph_id, actor),
+        let context = load_graph_access_context(pool, graph_id).await?;
+        Err(graph_access_denied_error(
+            actor,
+            graph_id,
+            context,
+            &normalized_roles,
         ))
     } else {
         Err(LibError::not_found(
@@ -626,7 +685,7 @@ pub async fn update_graph(
     .bind(&definition.metadata)
     .bind(graph_id.0)
     .bind(actor.0)
-    .bind(normalized_roles)
+    .bind(&normalized_roles)
     .bind(permissions::graph_role_scope())
     .bind(permissions::graph_role_scope_id_global())
     .execute(&mut *tx)
@@ -639,9 +698,12 @@ pub async fn update_graph(
             .map_err(|err| db_err("Failed to rollback transaction", err))?;
 
         return if graph_exists(pool, graph_id).await? {
-            Err(LibError::forbidden(
-                "You do not have access to this graph",
-                anyhow!("graph {} access denied for user {}", graph_id, actor),
+            let context = load_graph_access_context(pool, graph_id).await?;
+            Err(graph_access_denied_error(
+                actor,
+                graph_id,
+                context,
+                &normalized_roles,
             ))
         } else {
             Err(LibError::not_found(
@@ -734,7 +796,7 @@ pub async fn delete_graph(
     )
     .bind(graph_id.0)
     .bind(actor.0)
-    .bind(normalized_roles)
+    .bind(&normalized_roles)
     .bind(permissions::graph_role_scope())
     .bind(permissions::graph_role_scope_id_global())
     .execute(pool)
@@ -743,9 +805,12 @@ pub async fn delete_graph(
 
     if deleted.rows_affected() == 0 {
         return if graph_exists(pool, graph_id).await? {
-            Err(LibError::forbidden(
-                "You do not have access to this graph",
-                anyhow!("graph {} access denied for user {}", graph_id, actor),
+            let context = load_graph_access_context(pool, graph_id).await?;
+            Err(graph_access_denied_error(
+                actor,
+                graph_id,
+                context,
+                &normalized_roles,
             ))
         } else {
             Err(LibError::not_found(

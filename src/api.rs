@@ -8,7 +8,7 @@ use axum::{
     routing::get,
 };
 use subseq_auth::group_id::GroupId;
-use subseq_auth::prelude::{AuthenticatedUser, ValidatesIdentity};
+use subseq_auth::prelude::{AuthenticatedUser, ValidatesIdentity, structured_error_response};
 
 use crate::db;
 use crate::error::{ErrorKind, LibError};
@@ -36,9 +36,8 @@ impl IntoResponse for AppError {
             ErrorKind::NotFound => StatusCode::NOT_FOUND,
             ErrorKind::Unknown => StatusCode::INTERNAL_SERVER_ERROR,
         };
-
         tracing::error!(kind = ?self.0.kind, error = %self.0.source, "graph api request failed");
-        (status, self.0.public).into_response()
+        structured_error_response(status, self.0.code, self.0.public, self.0.details)
     }
 }
 

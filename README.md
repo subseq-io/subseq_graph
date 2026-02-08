@@ -62,3 +62,37 @@ For global graph permissions:
 
 `/graph/group/{group_id}/permissions` reads/writes graph permission roles in
 `auth.group_roles` for that group scope. Only the hard-coded graph permission role names above are accepted.
+
+### Programmatic Permission Errors
+
+Graph API errors use the shared auth-layer structured error shape from
+`subseq_auth::prelude::structured_error_response`.
+
+When access fails due to missing scope roles, responses use:
+
+- `status = 403`
+- `error.code = "missing_scope_check"`
+- `error.details.type = "missing_scope_check"`
+- `error.details.scope`
+- `error.details.scope_id`
+- `error.details.required_any_roles`
+
+Example:
+
+```json
+{
+  "error": {
+    "code": "missing_scope_check",
+    "message": "You do not have access to this graph",
+    "details": {
+      "type": "missing_scope_check",
+      "scope": "graph",
+      "scope_id": "8a529ede-a93d-4b31-861f-d305a7c31f2d",
+      "required_any_roles": [
+        "graph_read",
+        "graph_update"
+      ]
+    }
+  }
+}
+```

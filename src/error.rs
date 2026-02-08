@@ -1,4 +1,5 @@
 use anyhow::anyhow;
+use subseq_auth::prelude::ApiErrorDetails;
 
 pub type Result<T> = std::result::Result<T, LibError>;
 
@@ -14,7 +15,9 @@ pub enum ErrorKind {
 #[derive(Debug)]
 pub struct LibError {
     pub kind: ErrorKind,
+    pub code: &'static str,
     pub public: &'static str,
+    pub details: Option<ApiErrorDetails>,
     pub source: anyhow::Error,
 }
 
@@ -22,7 +25,9 @@ impl LibError {
     pub fn database(public: &'static str, source: anyhow::Error) -> Self {
         Self {
             kind: ErrorKind::Database,
+            code: "database_error",
             public,
+            details: None,
             source,
         }
     }
@@ -30,7 +35,9 @@ impl LibError {
     pub fn invalid(public: &'static str, source: anyhow::Error) -> Self {
         Self {
             kind: ErrorKind::InvalidInput,
+            code: "invalid_input",
             public,
+            details: None,
             source,
         }
     }
@@ -38,7 +45,29 @@ impl LibError {
     pub fn forbidden(public: &'static str, source: anyhow::Error) -> Self {
         Self {
             kind: ErrorKind::Forbidden,
+            code: "forbidden",
             public,
+            details: None,
+            source,
+        }
+    }
+
+    pub fn forbidden_missing_scope(
+        public: &'static str,
+        scope: &str,
+        scope_id: String,
+        required_any_roles: Vec<String>,
+        source: anyhow::Error,
+    ) -> Self {
+        Self {
+            kind: ErrorKind::Forbidden,
+            code: "missing_scope_check",
+            public,
+            details: Some(ApiErrorDetails::MissingScopeCheck {
+                scope: scope.to_string(),
+                scope_id,
+                required_any_roles,
+            }),
             source,
         }
     }
@@ -46,7 +75,9 @@ impl LibError {
     pub fn not_found(public: &'static str, source: anyhow::Error) -> Self {
         Self {
             kind: ErrorKind::NotFound,
+            code: "not_found",
             public,
+            details: None,
             source,
         }
     }
@@ -54,7 +85,9 @@ impl LibError {
     pub fn unknown(public: &'static str, source: anyhow::Error) -> Self {
         Self {
             kind: ErrorKind::Unknown,
+            code: "unknown_error",
             public,
+            details: None,
             source,
         }
     }
