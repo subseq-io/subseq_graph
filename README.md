@@ -132,3 +132,57 @@ Security rule:
 
 This keeps agent actions aligned with the same role/scope checks used by the
 HTTP API.
+
+## Graph Kinds and Invariants
+
+Graphs now persist a `kind` with one of:
+
+- `tree`
+- `dag`
+- `directed`
+
+Invariant enforcement is applied on graph write paths (`create`, `update`, and
+`extend` via update):
+
+- `tree`:
+  - no self-loops
+  - acyclic
+  - in-degree <= 1 for every node
+  - exactly one root (in-degree = 0)
+  - rooted connectivity (all nodes reachable from the root)
+- `dag`:
+  - no self-loops
+  - acyclic
+- `directed`:
+  - cycles are allowed
+
+Invariant violations are returned as validation errors (`400`) with a stable
+machine-readable `error.code` (for example `graph_dag_cycle`).
+
+## Edge Validation API
+
+`POST /graph/validate` validates a candidate graph structure without mutating
+state. It returns machine-readable violation reasons.
+
+Request body:
+
+```json
+{
+  "kind": "tree",
+  "nodes": [{ "id": "uuid", "label": "A" }],
+  "edges": [{ "fromNodeId": "uuid", "toNodeId": "uuid" }]
+}
+```
+
+Response body:
+
+```json
+{
+  "valid": false,
+  "violations": [
+    {
+      "type": "cycle_detected"
+    }
+  ]
+}
+```

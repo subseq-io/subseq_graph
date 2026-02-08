@@ -89,7 +89,7 @@ mod tests {
     use serde_json::json;
     use subseq_auth::user_id::UserId;
 
-    use crate::models::{DirectedGraph, GraphEdge, GraphId, GraphNode, GraphNodeId};
+    use crate::models::{DirectedGraph, GraphEdge, GraphId, GraphKind, GraphNode, GraphNodeId};
 
     fn sample_graph() -> DirectedGraph {
         let n1 = GraphNode {
@@ -107,6 +107,7 @@ mod tests {
             id: GraphId(uuid::Uuid::new_v4()),
             owner_user_id: UserId(uuid::Uuid::new_v4()),
             owner_group_id: None,
+            kind: GraphKind::Directed,
             name: "Example".to_string(),
             description: None,
             metadata: json!({}),

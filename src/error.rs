@@ -42,6 +42,20 @@ impl LibError {
         }
     }
 
+    pub fn invalid_with_code(
+        code: &'static str,
+        public: &'static str,
+        source: anyhow::Error,
+    ) -> Self {
+        Self {
+            kind: ErrorKind::InvalidInput,
+            code,
+            public,
+            details: None,
+            source,
+        }
+    }
+
     pub fn forbidden(public: &'static str, source: anyhow::Error) -> Self {
         Self {
             kind: ErrorKind::Forbidden,

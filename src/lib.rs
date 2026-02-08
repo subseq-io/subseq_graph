@@ -4,6 +4,7 @@ pub mod api;
 #[cfg(feature = "sqlx")]
 pub mod db;
 pub mod error;
+pub mod invariants;
 pub mod models;
 #[cfg(feature = "sqlx")]
 pub mod operations;
@@ -19,10 +20,13 @@ pub mod prelude {
         list_graphs, list_group_allowed_roles, set_group_allowed_roles, update_graph,
     };
     pub use crate::error::{ErrorKind, LibError, Result};
+    pub use crate::invariants::{ensure_graph_invariants, graph_invariant_violations};
     pub use crate::models::{
-        CreateGraphPayload, DirectedGraph, GraphEdge, GraphId, GraphNode, GraphNodeId,
-        GraphSummary, GroupGraphPermissions, ListGraphsQuery, NewGraphEdge, NewGraphNode, Paged,
-        UpdateGraphPayload, UpdateGroupGraphPermissionsPayload,
+        CreateGraphPayload, DirectedGraph, GraphEdge, GraphId, GraphInvariantInput,
+        GraphInvariantViolation, GraphKind, GraphNode, GraphNodeId, GraphSummary,
+        GroupGraphPermissions, ListGraphsQuery, NewGraphEdge, NewGraphNode, Paged,
+        UpdateGraphPayload, UpdateGroupGraphPermissionsPayload, ValidateGraphEdgesPayload,
+        ValidateGraphEdgesResponse,
     };
     #[cfg(feature = "sqlx")]
     pub use crate::operations::{

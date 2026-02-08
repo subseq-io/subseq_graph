@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use subseq_auth::group_id::GroupId;
 use subseq_auth::prelude::{AuthenticatedUser, ValidatesIdentity, structured_error_response};
@@ -14,7 +14,7 @@ use crate::db;
 use crate::error::{ErrorKind, LibError};
 use crate::models::{
     CreateGraphPayload, GraphId, GroupGraphPermissions, ListGraphsQuery, Paged, UpdateGraphPayload,
-    UpdateGroupGraphPermissionsPayload,
+    UpdateGroupGraphPermissionsPayload, ValidateGraphEdgesPayload, ValidateGraphEdgesResponse,
 };
 use crate::permissions;
 
@@ -195,15 +195,37 @@ where
     }))
 }
 
+async fn validate_graph_edges_handler<S>(
+    State(_app): State<S>,
+    _auth_user: AuthenticatedUser,
+    Json(payload): Json<ValidateGraphEdgesPayload>,
+) -> Result<impl IntoResponse, AppError>
+where
+    S: GraphApp + Clone + Send + Sync + 'static,
+{
+    let normalized = payload.normalize()?;
+    let violations = crate::invariants::graph_invariant_violations(
+        normalized.kind,
+        &normalized.nodes,
+        &normalized.edges,
+    );
+    Ok(Json(ValidateGraphEdgesResponse {
+        valid: violations.is_empty(),
+        violations,
+    }))
+}
+
 pub fn routes<S>() -> Router<S>
 where
     S: GraphApp + Clone + Send + Sync + 'static,
 {
     tracing::info!("Registering route /graph [GET,POST]");
+    tracing::info!("Registering route /graph/validate [POST]");
     tracing::info!("Registering route /graph/{{graph_id}} [GET,PUT,DELETE]");
     tracing::info!("Registering route /graph/group/{{group_id}}/permissions [GET,PUT]");
 
     Router::new()
+        .route("/graph/validate", post(validate_graph_edges_handler::<S>))
         .route(
             "/graph",
             get(list_graphs_handler::<S>).post(create_graph_handler::<S>),

@@ -11,8 +11,8 @@ use subseq_auth::user_id::UserId;
 
 use crate::error::{LibError, Result};
 use crate::models::{
-    CreateGraphPayload, DirectedGraph, GraphDefinition, GraphEdge, GraphId, GraphNode, GraphNodeId,
-    GraphSummary, UpdateGraphPayload,
+    CreateGraphPayload, DirectedGraph, GraphDefinition, GraphEdge, GraphId, GraphKind, GraphNode,
+    GraphNodeId, GraphSummary, UpdateGraphPayload,
 };
 use crate::permissions;
 
@@ -31,6 +31,7 @@ struct GraphRow {
     id: Uuid,
     owner_user_id: Uuid,
     owner_group_id: Option<Uuid>,
+    kind: String,
     name: String,
     description: Option<String>,
     metadata: serde_json::Value,
@@ -43,6 +44,7 @@ struct GraphSummaryRow {
     id: Uuid,
     owner_user_id: Uuid,
     owner_group_id: Option<Uuid>,
+    kind: String,
     name: String,
     description: Option<String>,
     created_at: chrono::NaiveDateTime,
@@ -70,31 +72,45 @@ struct GraphAccessContextRow {
     owner_group_id: Option<Uuid>,
 }
 
-impl From<GraphSummaryRow> for GraphSummary {
-    fn from(value: GraphSummaryRow) -> Self {
-        Self {
-            id: GraphId(value.id),
-            owner_user_id: UserId(value.owner_user_id),
-            owner_group_id: value.owner_group_id.map(GroupId),
-            name: value.name,
-            description: value.description,
-            created_at: value.created_at,
-            updated_at: value.updated_at,
-            node_count: value.node_count,
-            edge_count: value.edge_count,
-        }
-    }
+fn graph_summary_from_row(value: GraphSummaryRow) -> Result<GraphSummary> {
+    let kind = GraphKind::from_db_value(&value.kind).ok_or_else(|| {
+        LibError::database(
+            "Failed to decode graph kind",
+            anyhow!("unknown graph kind value '{}'", value.kind),
+        )
+    })?;
+
+    Ok(GraphSummary {
+        id: GraphId(value.id),
+        owner_user_id: UserId(value.owner_user_id),
+        owner_group_id: value.owner_group_id.map(GroupId),
+        kind,
+        name: value.name,
+        description: value.description,
+        created_at: value.created_at,
+        updated_at: value.updated_at,
+        node_count: value.node_count,
+        edge_count: value.edge_count,
+    })
 }
 
 fn hydrate_graph(
     row: GraphRow,
     nodes: Vec<GraphNodeRow>,
     edges: Vec<GraphEdgeRow>,
-) -> DirectedGraph {
-    DirectedGraph {
+) -> Result<DirectedGraph> {
+    let kind = GraphKind::from_db_value(&row.kind).ok_or_else(|| {
+        LibError::database(
+            "Failed to decode graph kind",
+            anyhow!("unknown graph kind value '{}'", row.kind),
+        )
+    })?;
+
+    Ok(DirectedGraph {
         id: GraphId(row.id),
         owner_user_id: UserId(row.owner_user_id),
         owner_group_id: row.owner_group_id.map(GroupId),
+        kind,
         name: row.name,
         description: row.description,
         metadata: row.metadata,
@@ -116,7 +132,7 @@ fn hydrate_graph(
                 metadata: edge.metadata,
             })
             .collect(),
-    }
+    })
 }
 
 fn db_err(public: &'static str, err: sqlx::Error) -> LibError {
@@ -311,6 +327,7 @@ async fn load_accessible_graph(
             g.id,
             g.owner_user_id,
             g.owner_group_id,
+            g.kind,
             g.name,
             g.description,
             g.metadata,
@@ -389,6 +406,12 @@ async fn write_graph_contents(
     graph_id: GraphId,
     definition: &GraphDefinition,
 ) -> Result<()> {
+    crate::invariants::ensure_graph_invariants(
+        definition.kind,
+        &definition.nodes,
+        &definition.edges,
+    )?;
+
     for node in &definition.nodes {
         sqlx::query(
             r#"
@@ -431,6 +454,11 @@ pub async fn create_graph(
     group_create_roles: &[&str],
 ) -> Result<DirectedGraph> {
     let definition = payload.normalize()?;
+    crate::invariants::ensure_graph_invariants(
+        definition.kind,
+        &definition.nodes,
+        &definition.edges,
+    )?;
     if let Some(group_id) = definition.owner_group_id {
         ensure_group_permission(
             pool,
@@ -456,16 +484,18 @@ pub async fn create_graph(
             id,
             owner_user_id,
             owner_group_id,
+            kind,
             name,
             description,
             metadata
         )
-        VALUES ($1, $2, $3, $4, $5, $6)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
     .bind(graph_id.0)
     .bind(actor.0)
     .bind(owner_group_id)
+    .bind(definition.kind.as_db_value())
     .bind(&definition.name)
     .bind(&definition.description)
     .bind(&definition.metadata)
@@ -515,7 +545,7 @@ pub async fn get_graph(
     .await
     .map_err(|err| db_err("Failed to query graph edges", err))?;
 
-    Ok(hydrate_graph(graph, nodes, edges))
+    hydrate_graph(graph, nodes, edges)
 }
 
 pub async fn list_graphs(
@@ -534,6 +564,7 @@ pub async fn list_graphs(
             g.id,
             g.owner_user_id,
             g.owner_group_id,
+            g.kind,
             g.name,
             g.description,
             g.created_at,
@@ -603,7 +634,7 @@ pub async fn list_graphs(
     .await
     .map_err(|err| db_err("Failed to list graphs", err))?;
 
-    Ok(rows.into_iter().map(GraphSummary::from).collect())
+    rows.into_iter().map(graph_summary_from_row).collect()
 }
 
 pub async fn update_graph(
@@ -614,6 +645,11 @@ pub async fn update_graph(
     group_update_roles: &[&str],
 ) -> Result<DirectedGraph> {
     let definition = payload.normalize()?;
+    crate::invariants::ensure_graph_invariants(
+        definition.kind,
+        &definition.nodes,
+        &definition.edges,
+    )?;
 
     if let Some(group_id) = definition.owner_group_id {
         ensure_group_permission(
@@ -636,13 +672,14 @@ pub async fn update_graph(
         r#"
         UPDATE graph.graphs
         SET owner_group_id = $1,
-            name = $2,
-            description = $3,
-            metadata = $4,
+            kind = $2,
+            name = $3,
+            description = $4,
+            metadata = $5,
             updated_at = CURRENT_TIMESTAMP
-        WHERE id = $5
+        WHERE id = $6
           AND (
-              (owner_group_id IS NULL AND owner_user_id = $6)
+              (owner_group_id IS NULL AND owner_user_id = $7)
               OR (
                   owner_group_id IS NOT NULL
                   AND EXISTS (
@@ -653,7 +690,7 @@ pub async fn update_graph(
                       JOIN auth.users usr
                         ON usr.id = gm.user_id
                       WHERE gm.group_id = graph.graphs.owner_group_id
-                        AND gm.user_id = $6
+                        AND gm.user_id = $7
                         AND grp.active = TRUE
                         AND usr.active = TRUE
                         AND (
@@ -661,17 +698,17 @@ pub async fn update_graph(
                                 SELECT 1
                                 FROM auth.user_roles ur
                                 WHERE ur.user_id = gm.user_id
-                                  AND ur.scope = $8
-                                  AND ur.scope_id IN (gm.group_id::text, $9)
-                                  AND ur.role_name = ANY($7)
+                                  AND ur.scope = $9
+                                  AND ur.scope_id IN (gm.group_id::text, $10)
+                                  AND ur.role_name = ANY($8)
                             )
                             OR EXISTS (
                                 SELECT 1
                                 FROM auth.group_roles gr
                                 WHERE gr.group_id = gm.group_id
-                                  AND gr.scope = $8
+                                  AND gr.scope = $9
                                   AND gr.scope_id = gm.group_id::text
-                                  AND gr.role_name = ANY($7)
+                                  AND gr.role_name = ANY($8)
                             )
                         )
                   )
@@ -680,6 +717,7 @@ pub async fn update_graph(
         "#,
     )
     .bind(definition.owner_group_id.map(|id| id.0))
+    .bind(definition.kind.as_db_value())
     .bind(&definition.name)
     .bind(&definition.description)
     .bind(&definition.metadata)

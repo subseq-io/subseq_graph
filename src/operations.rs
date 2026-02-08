@@ -352,6 +352,7 @@ fn merge_graph_additions(
     }
 
     Ok(UpdateGraphPayload {
+        kind: existing.kind,
         name: existing.name.clone(),
         description: existing.description.clone(),
         metadata: Some(existing.metadata.clone()),
@@ -367,7 +368,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::models::{GraphEdge, GraphNode};
+    use crate::models::{GraphEdge, GraphKind, GraphNode};
 
     fn sample_graph() -> (DirectedGraph, GraphNodeId, GraphNodeId) {
         let n1 = GraphNodeId(Uuid::new_v4());
@@ -382,6 +383,7 @@ mod tests {
                 id: GraphId(Uuid::new_v4()),
                 owner_user_id: UserId(Uuid::new_v4()),
                 owner_group_id: Some(GroupId(Uuid::new_v4())),
+                kind: GraphKind::Directed,
                 name: "Roadmap".to_string(),
                 description: Some("planning".to_string()),
                 metadata: json!({"source": "test"}),
@@ -517,5 +519,29 @@ mod tests {
             .expect("added node should exist");
         assert_eq!(added.label, "with spaces");
         assert_eq!(added.metadata, Some(json!({})));
+    }
+
+    #[test]
+    fn merge_graph_additions_can_trigger_kind_invariant_failure_on_normalize() {
+        let (mut graph, n1, n2) = sample_graph();
+        graph.kind = GraphKind::Dag;
+
+        let merged = merge_graph_additions(
+            &graph,
+            ExtendGraphPayload {
+                nodes: vec![],
+                edges: vec![NewGraphEdge {
+                    from_node_id: n2,
+                    to_node_id: n1,
+                    metadata: None,
+                }],
+            },
+        )
+        .expect("merge should produce payload");
+
+        let err = merged
+            .normalize()
+            .expect_err("dag back-edge should fail invariant checks");
+        assert_eq!(err.code, "graph_dag_cycle");
     }
 }
