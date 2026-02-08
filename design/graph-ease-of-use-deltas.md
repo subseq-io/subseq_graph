@@ -24,6 +24,11 @@ full-graph replacement for every change and support cross-graph atomic updates.
    - GIN index on `graph.nodes.metadata`
    - GIN index on `graph.edges.metadata`
    - expression index on `(graph.nodes.metadata ->> 'external_id')`
+8. Canonicalize metadata at boundaries with typed API/DB shims:
+   - API-facing metadata is normalized to `camelCase`
+   - DB-facing metadata is normalized to `snake_case`
+   - conflicting keys after normalization are rejected
+   - non-object metadata payloads are rejected
 
 ## Invariants and Auth
 
@@ -52,3 +57,4 @@ full-graph replacement for every change and support cross-graph atomic updates.
 - `remove_node` currently disallows removing the final node in a graph.
 - `external_id` semantics are caller-defined and not globally unique unless the
   caller enforces uniqueness.
+- Metadata payloads must be JSON objects; scalar/array metadata is rejected.

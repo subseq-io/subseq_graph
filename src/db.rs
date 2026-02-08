@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use anyhow::anyhow;
 use chrono::NaiveDateTime;
 use once_cell::sync::Lazy;
-use serde_json::{Value, json};
+use serde_json::Value;
 use sqlx::migrate::{MigrateError, Migrator};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
@@ -16,7 +16,7 @@ use crate::models::{
     AddEdgePayload, CreateGraphPayload, DirectedGraph, GraphDefinition, GraphDeltaCommand,
     GraphDeltaOperation, GraphEdge, GraphId, GraphKind, GraphNode, GraphNodeId, GraphSummary,
     RemoveEdgePayload, RemoveNodePayload, UpdateGraphPayload, UpsertEdgeMetadataPayload,
-    UpsertNodePayload,
+    UpsertNodePayload, api_metadata_to_db_json, db_metadata_to_api_json, normalize_api_metadata,
 };
 use crate::permissions;
 
@@ -110,6 +110,31 @@ fn hydrate_graph(
         )
     })?;
 
+    let graph_metadata = db_metadata_to_api_json(&row.metadata)
+        .map_err(|err| db_metadata_decode_err("Failed to decode graph metadata", err))?;
+
+    let mut output_nodes = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let metadata = db_metadata_to_api_json(&node.metadata)
+            .map_err(|err| db_metadata_decode_err("Failed to decode graph node metadata", err))?;
+        output_nodes.push(GraphNode {
+            id: GraphNodeId(node.id),
+            label: node.label,
+            metadata,
+        });
+    }
+
+    let mut output_edges = Vec::with_capacity(edges.len());
+    for edge in edges {
+        let metadata = db_metadata_to_api_json(&edge.metadata)
+            .map_err(|err| db_metadata_decode_err("Failed to decode graph edge metadata", err))?;
+        output_edges.push(GraphEdge {
+            from_node_id: GraphNodeId(edge.from_node_id),
+            to_node_id: GraphNodeId(edge.to_node_id),
+            metadata,
+        });
+    }
+
     Ok(DirectedGraph {
         id: GraphId(row.id),
         owner_user_id: UserId(row.owner_user_id),
@@ -117,30 +142,20 @@ fn hydrate_graph(
         kind,
         name: row.name,
         description: row.description,
-        metadata: row.metadata,
+        metadata: graph_metadata,
         created_at: row.created_at,
         updated_at: row.updated_at,
-        nodes: nodes
-            .into_iter()
-            .map(|node| GraphNode {
-                id: GraphNodeId(node.id),
-                label: node.label,
-                metadata: node.metadata,
-            })
-            .collect(),
-        edges: edges
-            .into_iter()
-            .map(|edge| GraphEdge {
-                from_node_id: GraphNodeId(edge.from_node_id),
-                to_node_id: GraphNodeId(edge.to_node_id),
-                metadata: edge.metadata,
-            })
-            .collect(),
+        nodes: output_nodes,
+        edges: output_edges,
     })
 }
 
 fn db_err(public: &'static str, err: sqlx::Error) -> LibError {
     LibError::database(public, anyhow!(err))
+}
+
+fn db_metadata_decode_err(public: &'static str, err: LibError) -> LibError {
+    LibError::database(public, err.source)
 }
 
 async fn graph_exists(pool: &PgPool, graph_id: GraphId) -> Result<bool> {
@@ -530,14 +545,18 @@ async fn load_graph_nodes_tx(
     .await
     .map_err(|err| db_err("Failed to query graph nodes", err))?;
 
-    Ok(rows
-        .into_iter()
-        .map(|node| GraphNode {
+    let mut nodes = Vec::with_capacity(rows.len());
+    for node in rows {
+        let metadata = db_metadata_to_api_json(&node.metadata)
+            .map_err(|err| db_metadata_decode_err("Failed to decode graph node metadata", err))?;
+        nodes.push(GraphNode {
             id: GraphNodeId(node.id),
             label: node.label,
-            metadata: node.metadata,
-        })
-        .collect())
+            metadata,
+        });
+    }
+
+    Ok(nodes)
 }
 
 async fn load_graph_edges_tx(
@@ -557,14 +576,18 @@ async fn load_graph_edges_tx(
     .await
     .map_err(|err| db_err("Failed to query graph edges", err))?;
 
-    Ok(rows
-        .into_iter()
-        .map(|edge| GraphEdge {
+    let mut edges = Vec::with_capacity(rows.len());
+    for edge in rows {
+        let metadata = db_metadata_to_api_json(&edge.metadata)
+            .map_err(|err| db_metadata_decode_err("Failed to decode graph edge metadata", err))?;
+        edges.push(GraphEdge {
             from_node_id: GraphNodeId(edge.from_node_id),
             to_node_id: GraphNodeId(edge.to_node_id),
-            metadata: edge.metadata,
-        })
-        .collect())
+            metadata,
+        });
+    }
+
+    Ok(edges)
 }
 
 fn update_graph_definition_node(
@@ -583,14 +606,14 @@ fn update_graph_definition_node(
         if let Some(node) = nodes.iter_mut().find(|node| node.id == node_id) {
             node.label = label;
             if let Some(metadata) = &payload.metadata {
-                node.metadata = metadata.clone();
+                node.metadata = normalize_api_metadata(Some(metadata.clone()))?;
             }
             Ok((node_id, false))
         } else {
             nodes.push(GraphNode {
                 id: node_id,
                 label,
-                metadata: payload.metadata.clone().unwrap_or_else(|| json!({})),
+                metadata: normalize_api_metadata(payload.metadata.clone())?,
             });
             Ok((node_id, true))
         }
@@ -599,7 +622,7 @@ fn update_graph_definition_node(
         nodes.push(GraphNode {
             id: new_id,
             label,
-            metadata: payload.metadata.clone().unwrap_or_else(|| json!({})),
+            metadata: normalize_api_metadata(payload.metadata.clone())?,
         });
         Ok((new_id, true))
     }
@@ -635,6 +658,7 @@ async fn write_graph_contents(
     )?;
 
     for node in &definition.nodes {
+        let metadata = api_metadata_to_db_json(&node.metadata)?;
         sqlx::query(
             r#"
             INSERT INTO graph.nodes (id, graph_id, label, metadata)
@@ -644,13 +668,14 @@ async fn write_graph_contents(
         .bind(node.id.0)
         .bind(graph_id.0)
         .bind(&node.label)
-        .bind(&node.metadata)
+        .bind(metadata)
         .execute(&mut **tx)
         .await
         .map_err(|err| db_err("Failed to write graph nodes", err))?;
     }
 
     for edge in &definition.edges {
+        let metadata = api_metadata_to_db_json(&edge.metadata)?;
         sqlx::query(
             r#"
             INSERT INTO graph.edges (graph_id, from_node_id, to_node_id, metadata)
@@ -660,7 +685,7 @@ async fn write_graph_contents(
         .bind(graph_id.0)
         .bind(edge.from_node_id.0)
         .bind(edge.to_node_id.0)
-        .bind(&edge.metadata)
+        .bind(metadata)
         .execute(&mut **tx)
         .await
         .map_err(|err| db_err("Failed to write graph edges", err))?;
@@ -681,6 +706,7 @@ pub async fn create_graph(
         &definition.nodes,
         &definition.edges,
     )?;
+    let graph_metadata = api_metadata_to_db_json(&definition.metadata)?;
     if let Some(group_id) = definition.owner_group_id {
         ensure_group_permission(
             pool,
@@ -720,7 +746,7 @@ pub async fn create_graph(
     .bind(definition.kind.as_db_value())
     .bind(&definition.name)
     .bind(&definition.description)
-    .bind(&definition.metadata)
+    .bind(graph_metadata)
     .execute(&mut *tx)
     .await
     .map_err(|err| db_err("Failed to create graph", err))?;
@@ -872,6 +898,7 @@ pub async fn update_graph(
         &definition.nodes,
         &definition.edges,
     )?;
+    let graph_metadata = api_metadata_to_db_json(&definition.metadata)?;
 
     if let Some(group_id) = definition.owner_group_id {
         ensure_group_permission(
@@ -942,7 +969,7 @@ pub async fn update_graph(
     .bind(definition.kind.as_db_value())
     .bind(&definition.name)
     .bind(&definition.description)
-    .bind(&definition.metadata)
+    .bind(graph_metadata)
     .bind(graph_id.0)
     .bind(actor.0)
     .bind(&normalized_roles)
@@ -1036,6 +1063,7 @@ pub async fn update_graph_with_guard(
         &definition.nodes,
         &definition.edges,
     )?;
+    let graph_metadata = api_metadata_to_db_json(&definition.metadata)?;
 
     if let Some(group_id) = definition.owner_group_id {
         ensure_group_permission(
@@ -1079,7 +1107,7 @@ pub async fn update_graph_with_guard(
     .bind(definition.kind.as_db_value())
     .bind(&definition.name)
     .bind(&definition.description)
-    .bind(&definition.metadata)
+    .bind(graph_metadata)
     .bind(graph_id.0)
     .execute(&mut *tx)
     .await
@@ -1124,13 +1152,19 @@ pub async fn add_edge_tx(
     payload: AddEdgePayload,
     group_update_roles: &[&str],
 ) -> Result<()> {
+    let AddEdgePayload {
+        from_node_id,
+        to_node_id,
+        metadata,
+        expected_updated_at,
+    } = payload;
     let graph = load_accessible_graph_for_update_tx(
         tx,
         pool,
         actor,
         graph_id,
         group_update_roles,
-        payload.expected_updated_at,
+        expected_updated_at,
     )
     .await?;
     let kind = GraphKind::from_db_value(&graph.kind).ok_or_else(|| {
@@ -1143,10 +1177,11 @@ pub async fn add_edge_tx(
     let nodes = load_graph_nodes_tx(tx, graph_id).await?;
     let edges = load_graph_edges_tx(tx, graph_id).await?;
     let index = crate::invariants::GraphMutationIndex::new(kind, &nodes, &edges);
-    let violations = index.would_add_edge_violations(payload.from_node_id, payload.to_node_id);
+    let violations = index.would_add_edge_violations(from_node_id, to_node_id);
     if !violations.is_empty() {
         return Err(invariant_violation_error(kind, violations));
     }
+    let edge_metadata = api_metadata_to_db_json(&normalize_api_metadata(metadata)?)?;
 
     let inserted = sqlx::query(
         r#"
@@ -1156,9 +1191,9 @@ pub async fn add_edge_tx(
         "#,
     )
     .bind(graph_id.0)
-    .bind(payload.from_node_id.0)
-    .bind(payload.to_node_id.0)
-    .bind(payload.metadata.unwrap_or_else(|| json!({})))
+    .bind(from_node_id.0)
+    .bind(to_node_id.0)
+    .bind(edge_metadata)
     .execute(&mut **tx)
     .await
     .map_err(|err| db_err("Failed to add graph edge", err))?;
@@ -1168,8 +1203,8 @@ pub async fn add_edge_tx(
             "Edge already exists in graph",
             anyhow!(
                 "edge {} -> {} already exists in graph {}",
-                payload.from_node_id,
-                payload.to_node_id,
+                from_node_id,
+                to_node_id,
                 graph_id
             ),
         ));
@@ -1250,13 +1285,19 @@ pub async fn upsert_edge_metadata_tx(
     payload: UpsertEdgeMetadataPayload,
     group_update_roles: &[&str],
 ) -> Result<()> {
+    let UpsertEdgeMetadataPayload {
+        from_node_id,
+        to_node_id,
+        metadata,
+        expected_updated_at,
+    } = payload;
     let graph = load_accessible_graph_for_update_tx(
         tx,
         pool,
         actor,
         graph_id,
         group_update_roles,
-        payload.expected_updated_at,
+        expected_updated_at,
     )
     .await?;
     let kind = GraphKind::from_db_value(&graph.kind).ok_or_else(|| {
@@ -1268,16 +1309,17 @@ pub async fn upsert_edge_metadata_tx(
 
     let nodes = load_graph_nodes_tx(tx, graph_id).await?;
     let edges = load_graph_edges_tx(tx, graph_id).await?;
-    let edge_exists = edges.iter().any(|edge| {
-        edge.from_node_id == payload.from_node_id && edge.to_node_id == payload.to_node_id
-    });
+    let edge_exists = edges
+        .iter()
+        .any(|edge| edge.from_node_id == from_node_id && edge.to_node_id == to_node_id);
     if !edge_exists {
         let index = crate::invariants::GraphMutationIndex::new(kind, &nodes, &edges);
-        let violations = index.would_add_edge_violations(payload.from_node_id, payload.to_node_id);
+        let violations = index.would_add_edge_violations(from_node_id, to_node_id);
         if !violations.is_empty() {
             return Err(invariant_violation_error(kind, violations));
         }
     }
+    let edge_metadata = api_metadata_to_db_json(&normalize_api_metadata(Some(metadata))?)?;
 
     sqlx::query(
         r#"
@@ -1288,9 +1330,9 @@ pub async fn upsert_edge_metadata_tx(
         "#,
     )
     .bind(graph_id.0)
-    .bind(payload.from_node_id.0)
-    .bind(payload.to_node_id.0)
-    .bind(payload.metadata)
+    .bind(from_node_id.0)
+    .bind(to_node_id.0)
+    .bind(edge_metadata)
     .execute(&mut **tx)
     .await
     .map_err(|err| db_err("Failed to upsert graph edge metadata", err))?;
@@ -1335,6 +1377,7 @@ pub async fn upsert_node_tx(
         .find(|node| node.id == node_id)
         .map(|node| (node.label.clone(), node.metadata.clone()))
         .expect("updated node should exist");
+    let db_metadata = api_metadata_to_db_json(&metadata)?;
 
     if inserted {
         sqlx::query(
@@ -1346,7 +1389,7 @@ pub async fn upsert_node_tx(
         .bind(node_id.0)
         .bind(graph_id.0)
         .bind(label)
-        .bind(metadata)
+        .bind(&db_metadata)
         .execute(&mut **tx)
         .await
         .map_err(|err| db_err("Failed to insert graph node", err))?;
@@ -1361,7 +1404,7 @@ pub async fn upsert_node_tx(
             "#,
         )
         .bind(label)
-        .bind(metadata)
+        .bind(&db_metadata)
         .bind(graph_id.0)
         .bind(node_id.0)
         .execute(&mut **tx)
@@ -1659,10 +1702,17 @@ pub async fn find_node_by_external_id(
     .await
     .map_err(|err| db_err("Failed to query node by external id", err))?;
 
-    Ok(node.map(|node| GraphNode {
+    let Some(node) = node else {
+        return Ok(None);
+    };
+
+    let metadata = db_metadata_to_api_json(&node.metadata)
+        .map_err(|err| db_metadata_decode_err("Failed to decode graph node metadata", err))?;
+
+    Ok(Some(GraphNode {
         id: GraphNodeId(node.id),
         label: node.label,
-        metadata: node.metadata,
+        metadata,
     }))
 }
 
@@ -1689,14 +1739,18 @@ pub async fn list_incident_edges_for_node(
     .await
     .map_err(|err| db_err("Failed to query incident edges", err))?;
 
-    Ok(edges
-        .into_iter()
-        .map(|edge| GraphEdge {
+    let mut output = Vec::with_capacity(edges.len());
+    for edge in edges {
+        let metadata = db_metadata_to_api_json(&edge.metadata)
+            .map_err(|err| db_metadata_decode_err("Failed to decode graph edge metadata", err))?;
+        output.push(GraphEdge {
             from_node_id: GraphNodeId(edge.from_node_id),
             to_node_id: GraphNodeId(edge.to_node_id),
-            metadata: edge.metadata,
-        })
-        .collect())
+            metadata,
+        });
+    }
+
+    Ok(output)
 }
 
 pub async fn list_incident_edges_for_external_id(
@@ -1723,6 +1777,7 @@ pub async fn list_graph_nodes_by_metadata(
     group_read_roles: &[&str],
 ) -> Result<Vec<GraphNode>> {
     let _ = load_accessible_graph(pool, actor, graph_id, group_read_roles).await?;
+    let metadata_filter = api_metadata_to_db_json(metadata_contains)?;
     let rows = sqlx::query_as::<_, GraphNodeRow>(
         r#"
         SELECT id, label, metadata
@@ -1733,19 +1788,23 @@ pub async fn list_graph_nodes_by_metadata(
         "#,
     )
     .bind(graph_id.0)
-    .bind(metadata_contains)
+    .bind(metadata_filter)
     .fetch_all(pool)
     .await
     .map_err(|err| db_err("Failed to query graph nodes by metadata", err))?;
 
-    Ok(rows
-        .into_iter()
-        .map(|row| GraphNode {
+    let mut nodes = Vec::with_capacity(rows.len());
+    for row in rows {
+        let metadata = db_metadata_to_api_json(&row.metadata)
+            .map_err(|err| db_metadata_decode_err("Failed to decode graph node metadata", err))?;
+        nodes.push(GraphNode {
             id: GraphNodeId(row.id),
             label: row.label,
-            metadata: row.metadata,
-        })
-        .collect())
+            metadata,
+        });
+    }
+
+    Ok(nodes)
 }
 
 pub async fn list_graph_edges_by_metadata(
@@ -1756,6 +1815,7 @@ pub async fn list_graph_edges_by_metadata(
     group_read_roles: &[&str],
 ) -> Result<Vec<GraphEdge>> {
     let _ = load_accessible_graph(pool, actor, graph_id, group_read_roles).await?;
+    let metadata_filter = api_metadata_to_db_json(metadata_contains)?;
     let rows = sqlx::query_as::<_, GraphEdgeRow>(
         r#"
         SELECT from_node_id, to_node_id, metadata
@@ -1766,19 +1826,23 @@ pub async fn list_graph_edges_by_metadata(
         "#,
     )
     .bind(graph_id.0)
-    .bind(metadata_contains)
+    .bind(metadata_filter)
     .fetch_all(pool)
     .await
     .map_err(|err| db_err("Failed to query graph edges by metadata", err))?;
 
-    Ok(rows
-        .into_iter()
-        .map(|row| GraphEdge {
+    let mut edges = Vec::with_capacity(rows.len());
+    for row in rows {
+        let metadata = db_metadata_to_api_json(&row.metadata)
+            .map_err(|err| db_metadata_decode_err("Failed to decode graph edge metadata", err))?;
+        edges.push(GraphEdge {
             from_node_id: GraphNodeId(row.from_node_id),
             to_node_id: GraphNodeId(row.to_node_id),
-            metadata: row.metadata,
-        })
-        .collect())
+            metadata,
+        });
+    }
+
+    Ok(edges)
 }
 
 pub async fn delete_graph(
@@ -2141,5 +2205,57 @@ mod tests {
         assert!(inserted);
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].metadata, json!({"ext": "x"}));
+    }
+
+    #[test]
+    fn update_graph_definition_node_canonicalizes_metadata_case() {
+        let mut nodes = Vec::new();
+        let explicit_id = GraphNodeId(Uuid::new_v4());
+        let payload = UpsertNodePayload {
+            node_id: Some(explicit_id),
+            label: "new".to_string(),
+            metadata: Some(json!({
+                "external_id": "task-1",
+                "nested_value": {
+                    "task_id": "abc"
+                }
+            })),
+            expected_updated_at: None,
+        };
+
+        let (_, inserted) =
+            update_graph_definition_node(&mut nodes, &payload).expect("insert should work");
+        assert!(inserted);
+        assert_eq!(
+            nodes[0].metadata,
+            json!({
+                "externalId": "task-1",
+                "nestedValue": {
+                    "taskId": "abc"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn update_graph_definition_node_rejects_metadata_key_collisions() {
+        let mut nodes = Vec::new();
+        let explicit_id = GraphNodeId(Uuid::new_v4());
+        let payload = UpsertNodePayload {
+            node_id: Some(explicit_id),
+            label: "new".to_string(),
+            metadata: Some(json!({
+                "external_id": "a",
+                "externalId": "b"
+            })),
+            expected_updated_at: None,
+        };
+
+        let err = update_graph_definition_node(&mut nodes, &payload)
+            .expect_err("colliding metadata keys should fail");
+        assert_eq!(
+            err.public,
+            "Metadata contains conflicting keys after normalization"
+        );
     }
 }

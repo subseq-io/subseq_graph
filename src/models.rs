@@ -5,7 +5,7 @@ use std::str::FromStr;
 use anyhow::anyhow;
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value};
 use subseq_auth::group_id::GroupId;
 use subseq_auth::user_id::UserId;
 use uuid::Uuid;
@@ -85,6 +85,221 @@ impl From<Uuid> for GraphNodeId {
     fn from(value: Uuid) -> Self {
         Self(value)
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ApiMetadata(pub Map<String, Value>);
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DbMetadata(pub Map<String, Value>);
+
+#[derive(Debug, Clone, Copy)]
+enum MetadataKeyCase {
+    Camel,
+    Snake,
+}
+
+impl TryFrom<Value> for ApiMetadata {
+    type Error = LibError;
+
+    fn try_from(value: Value) -> Result<Self> {
+        let normalized = canonicalize_metadata_value(value, MetadataKeyCase::Camel, "$")?;
+        match normalized {
+            Value::Object(map) => Ok(Self(map)),
+            _ => Err(LibError::invalid(
+                "Metadata must be a JSON object",
+                anyhow!("metadata payload was not an object after normalization"),
+            )),
+        }
+    }
+}
+
+impl TryFrom<Value> for DbMetadata {
+    type Error = LibError;
+
+    fn try_from(value: Value) -> Result<Self> {
+        let normalized = canonicalize_metadata_value(value, MetadataKeyCase::Snake, "$")?;
+        match normalized {
+            Value::Object(map) => Ok(Self(map)),
+            _ => Err(LibError::invalid(
+                "Metadata must be a JSON object",
+                anyhow!("database metadata payload was not an object after normalization"),
+            )),
+        }
+    }
+}
+
+impl From<ApiMetadata> for DbMetadata {
+    fn from(value: ApiMetadata) -> Self {
+        let input = Value::Object(value.0);
+        let normalized = canonicalize_metadata_value(input, MetadataKeyCase::Snake, "$")
+            .expect("canonical api metadata should always convert to db metadata");
+        let Value::Object(map) = normalized else {
+            unreachable!("metadata normalization output must be an object");
+        };
+        Self(map)
+    }
+}
+
+impl From<DbMetadata> for ApiMetadata {
+    fn from(value: DbMetadata) -> Self {
+        let input = Value::Object(value.0);
+        let normalized = canonicalize_metadata_value(input, MetadataKeyCase::Camel, "$")
+            .expect("canonical db metadata should always convert to api metadata");
+        let Value::Object(map) = normalized else {
+            unreachable!("metadata normalization output must be an object");
+        };
+        Self(map)
+    }
+}
+
+impl From<ApiMetadata> for Value {
+    fn from(value: ApiMetadata) -> Self {
+        Value::Object(value.0)
+    }
+}
+
+impl From<DbMetadata> for Value {
+    fn from(value: DbMetadata) -> Self {
+        Value::Object(value.0)
+    }
+}
+
+pub fn normalize_api_metadata(metadata: Option<Value>) -> Result<Value> {
+    let input = metadata.unwrap_or_else(|| Value::Object(Map::new()));
+    let api_metadata = ApiMetadata::try_from(input)?;
+    Ok(Value::from(api_metadata))
+}
+
+pub fn api_metadata_to_db_json(metadata: &Value) -> Result<Value> {
+    let api_metadata = ApiMetadata::try_from(metadata.clone())?;
+    let db_metadata = DbMetadata::from(api_metadata);
+    Ok(Value::from(db_metadata))
+}
+
+pub fn db_metadata_to_api_json(metadata: &Value) -> Result<Value> {
+    let db_metadata = DbMetadata::try_from(metadata.clone())?;
+    let api_metadata = ApiMetadata::from(db_metadata);
+    Ok(Value::from(api_metadata))
+}
+
+fn canonicalize_metadata_value(value: Value, case: MetadataKeyCase, path: &str) -> Result<Value> {
+    match value {
+        Value::Object(map) => {
+            let mut normalized = Map::with_capacity(map.len());
+            for (raw_key, raw_value) in map {
+                let key = canonicalize_metadata_key(&raw_key, case);
+                if key.is_empty() {
+                    return Err(LibError::invalid(
+                        "Metadata keys must be non-empty",
+                        anyhow!("empty metadata key encountered at {}", path),
+                    ));
+                }
+
+                let child_path = format!("{}.{}", path, key);
+                let value = canonicalize_metadata_value(raw_value, case, &child_path)?;
+                if normalized.insert(key.clone(), value).is_some() {
+                    return Err(LibError::invalid(
+                        "Metadata contains conflicting keys after normalization",
+                        anyhow!(
+                            "metadata key collision for '{}' while normalizing {} at {}",
+                            key,
+                            case.as_str(),
+                            path
+                        ),
+                    ));
+                }
+            }
+
+            Ok(Value::Object(normalized))
+        }
+        Value::Array(values) => {
+            let mut normalized = Vec::with_capacity(values.len());
+            for (idx, value) in values.into_iter().enumerate() {
+                let child_path = format!("{}[{}]", path, idx);
+                normalized.push(canonicalize_metadata_value(value, case, &child_path)?);
+            }
+            Ok(Value::Array(normalized))
+        }
+        _ => Ok(value),
+    }
+}
+
+impl MetadataKeyCase {
+    const fn as_str(self) -> &'static str {
+        match self {
+            MetadataKeyCase::Camel => "camelCase",
+            MetadataKeyCase::Snake => "snake_case",
+        }
+    }
+}
+
+fn canonicalize_metadata_key(key: &str, case: MetadataKeyCase) -> String {
+    match case {
+        MetadataKeyCase::Camel => to_camel_case_key(key),
+        MetadataKeyCase::Snake => to_snake_case_key(key),
+    }
+}
+
+fn to_camel_case_key(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut uppercase_next = false;
+
+    for ch in input.chars() {
+        if !ch.is_alphanumeric() {
+            uppercase_next = !output.is_empty();
+            continue;
+        }
+
+        if output.is_empty() {
+            output.push(ch.to_ascii_lowercase());
+            uppercase_next = false;
+            continue;
+        }
+
+        if uppercase_next {
+            output.push(ch.to_ascii_uppercase());
+            uppercase_next = false;
+        } else {
+            output.push(ch);
+        }
+    }
+
+    output
+}
+
+fn to_snake_case_key(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut output = String::with_capacity(input.len());
+    let mut prev_was_separator = false;
+
+    for (idx, ch) in chars.iter().enumerate() {
+        if !ch.is_alphanumeric() {
+            if !output.is_empty() && !prev_was_separator {
+                output.push('_');
+                prev_was_separator = true;
+            }
+            continue;
+        }
+
+        let is_upper = ch.is_ascii_uppercase();
+        if is_upper && !output.is_empty() && !prev_was_separator {
+            let prev = chars[idx.saturating_sub(1)];
+            let prev_is_lower_or_digit = prev.is_ascii_lowercase() || prev.is_ascii_digit();
+            let prev_is_upper = prev.is_ascii_uppercase();
+            let next_is_lower = chars
+                .get(idx + 1)
+                .is_some_and(|next| next.is_ascii_lowercase());
+            if prev_is_lower_or_digit || (prev_is_upper && next_is_lower) {
+                output.push('_');
+            }
+        }
+
+        output.push(ch.to_ascii_lowercase());
+        prev_was_separator = false;
+    }
+
+    output.trim_matches('_').to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -474,7 +689,7 @@ impl UpdateGraphPayload {
 impl ValidateGraphEdgesPayload {
     pub fn normalize(self) -> Result<GraphInvariantInput> {
         let nodes = normalize_nodes(self.nodes, false)?;
-        let edges = normalize_validation_edges(self.edges);
+        let edges = normalize_validation_edges(self.edges)?;
 
         Ok(GraphInvariantInput {
             kind: self.kind,
@@ -509,7 +724,7 @@ fn normalize_graph_definition(
         kind,
         name,
         description,
-        metadata: metadata.unwrap_or_else(|| json!({})),
+        metadata: normalize_api_metadata(metadata)?,
         owner_group_id,
         nodes: output_nodes,
         edges: output_edges,
@@ -546,7 +761,7 @@ fn normalize_nodes(nodes: Vec<NewGraphNode>, require_non_empty: bool) -> Result<
         output_nodes.push(GraphNode {
             id: node_id,
             label,
-            metadata: node.metadata.unwrap_or_else(|| json!({})),
+            metadata: normalize_api_metadata(node.metadata)?,
         });
     }
 
@@ -579,20 +794,23 @@ fn normalize_write_edges(edges: Vec<NewGraphEdge>, nodes: &[GraphNode]) -> Resul
         output_edges.push(GraphEdge {
             from_node_id: edge.from_node_id,
             to_node_id: edge.to_node_id,
-            metadata: edge.metadata.unwrap_or_else(|| json!({})),
+            metadata: normalize_api_metadata(edge.metadata)?,
         });
     }
 
     Ok(output_edges)
 }
 
-fn normalize_validation_edges(edges: Vec<NewGraphEdge>) -> Vec<GraphEdge> {
+fn normalize_validation_edges(edges: Vec<NewGraphEdge>) -> Result<Vec<GraphEdge>> {
     edges
         .into_iter()
-        .map(|edge| GraphEdge {
-            from_node_id: edge.from_node_id,
-            to_node_id: edge.to_node_id,
-            metadata: edge.metadata.unwrap_or_else(|| json!({})),
+        .map(|edge| -> Result<GraphEdge> {
+            let metadata = normalize_api_metadata(edge.metadata)?;
+            Ok(GraphEdge {
+                from_node_id: edge.from_node_id,
+                to_node_id: edge.to_node_id,
+                metadata,
+            })
         })
         .collect()
 }
@@ -603,8 +821,78 @@ mod tests {
 
     use super::{
         CreateGraphPayload, GraphInvariantViolation, GraphKind, GraphNodeId, NewGraphEdge,
-        NewGraphNode, UpdateGraphPayload, ValidateGraphEdgesPayload,
+        NewGraphNode, UpdateGraphPayload, ValidateGraphEdgesPayload, api_metadata_to_db_json,
+        db_metadata_to_api_json, normalize_api_metadata,
     };
+
+    #[test]
+    fn normalize_api_metadata_converts_nested_keys_to_camel_case() {
+        let metadata = normalize_api_metadata(Some(json!({
+            "external_id": "task-1",
+            "nested_value": {"created_at": "2026-02-08"},
+            "items": [
+                {"task_id": "a"},
+                {"task_id": "b"}
+            ]
+        })))
+        .expect("metadata should normalize");
+
+        assert_eq!(
+            metadata,
+            json!({
+                "externalId": "task-1",
+                "nestedValue": {"createdAt": "2026-02-08"},
+                "items": [
+                    {"taskId": "a"},
+                    {"taskId": "b"}
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn api_metadata_db_conversion_round_trips_case() {
+        let api_metadata = json!({
+            "externalId": "task-1",
+            "nestedValue": {"createdAt": "2026-02-08"}
+        });
+
+        let db_metadata = api_metadata_to_db_json(&api_metadata).expect("api->db conversion");
+        assert_eq!(
+            db_metadata,
+            json!({
+                "external_id": "task-1",
+                "nested_value": {"created_at": "2026-02-08"}
+            })
+        );
+
+        let round_trip = db_metadata_to_api_json(&db_metadata).expect("db->api conversion");
+        assert_eq!(round_trip, api_metadata);
+    }
+
+    #[test]
+    fn normalize_api_metadata_rejects_non_object_payloads() {
+        let err = normalize_api_metadata(Some(json!("not-an-object")))
+            .expect_err("scalar metadata should be rejected");
+
+        assert_eq!(err.code, "invalid_input");
+        assert_eq!(err.public, "Metadata must be a JSON object");
+    }
+
+    #[test]
+    fn normalize_api_metadata_rejects_casing_collisions() {
+        let err = normalize_api_metadata(Some(json!({
+            "external_id": "a",
+            "externalId": "b"
+        })))
+        .expect_err("colliding keys should be rejected");
+
+        assert_eq!(err.code, "invalid_input");
+        assert_eq!(
+            err.public,
+            "Metadata contains conflicting keys after normalization"
+        );
+    }
 
     #[test]
     fn normalize_graph_generates_node_ids() {
