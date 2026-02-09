@@ -14,6 +14,7 @@ use chrono::Utc;
 use serde_json::json;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+use subseq_auth::db::create_user_tables;
 use subseq_auth::prelude::{
     AuthenticatedUser, ClaimsVerificationError, CoreIdToken, CoreIdTokenClaims, OidcToken, UserId,
     ValidatesIdentity,
@@ -103,24 +104,36 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let pool = PgPoolOptions::new()
-        .max_connections(5)
+        .max_connections(1)
         .connect(&database_url)
         .await
         .context("failed to connect to postgres")?;
 
+    create_user_tables(&pool)
+        .await
+        .context("failed to run auth migrations")?;
     subseq_graph::db::create_graph_tables(&pool)
         .await
         .context("failed to run graph migrations")?;
+
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await
+        .context("failed to connect to postgres")?;
 
     let app_state = ExampleApp {
         pool: Arc::new(pool),
         auth,
     };
 
-    let app = Router::new()
+    let api_v1 = Router::new()
         .route("/healthz", get(health_handler))
         .route("/example/whoami", get(whoami_handler))
-        .merge(subseq_graph::api::routes::<ExampleApp>())
+        .merge(subseq_graph::api::routes::<ExampleApp>());
+
+    let app = Router::new()
+        .nest("/api/v1", api_v1)
         .layer(from_fn_with_state(
             app_state.clone(),
             dev_identity_middleware,
@@ -135,6 +148,7 @@ async fn main() -> anyhow::Result<()> {
         "subseq_graph example server listening on http://{}",
         bind_addr
     );
+    println!("api base path: /api/v1");
     println!("auth shim headers: x-dev-user-id, x-dev-email, x-dev-username");
     println!("set GRAPH_EXAMPLE_REQUIRE_DEV_HEADER=true to require x-dev-user-id");
 

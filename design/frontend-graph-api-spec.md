@@ -11,6 +11,7 @@ example-server usage and `@xyflow/react` integration guidance.
 - Local constrained example:
   - run: `DATABASE_URL=postgres://... cargo run --example graph_api_server`
   - default bind: `http://127.0.0.1:4010`
+- API prefix for all routes in this document: `/api/v1`
 
 ### Auth
 
@@ -90,7 +91,7 @@ All API errors return:
 
 ## 4) Routes
 
-## `GET /healthz` (example server helper)
+## `GET /api/v1/healthz` (example server helper)
 
 - Response `200`:
 
@@ -98,7 +99,7 @@ All API errors return:
 { "ok": true }
 ```
 
-## `GET /example/whoami` (example server helper)
+## `GET /api/v1/example/whoami` (example server helper)
 
 - Response `200`:
 
@@ -109,7 +110,7 @@ All API errors return:
 }
 ```
 
-## `POST /graph`
+## `POST /api/v1/graph`
 
 Create graph. Returns full graph.
 
@@ -138,7 +139,7 @@ Notes:
 - At least one node required.
 - Graph invariants enforced by `kind`.
 
-## `GET /graph`
+## `GET /api/v1/graph`
 
 List graphs visible to user.
 
@@ -170,21 +171,21 @@ Response `200`:
 }
 ```
 
-## `GET /graph/{graph_id}`
+## `GET /api/v1/graph/{graph_id}`
 
 Get full graph.
 
 Response `200`: `DirectedGraph`
 
-## `PUT /graph/{graph_id}`
+## `PUT /api/v1/graph/{graph_id}`
 
 Full replace update.
 
-Request: same shape as `POST /graph` without `id`.
+Request: same shape as `POST /api/v1/graph` without `id`.
 
 Response `200`: `DirectedGraph`
 
-## `PUT /graph/{graph_id}/replace`
+## `PUT /api/v1/graph/{graph_id}/replace`
 
 Guarded full replace (optimistic concurrency).
 
@@ -211,13 +212,13 @@ Conflict:
 
 - `409` with `error.code = "stale_graph_update"` if `expectedUpdatedAt` mismatches.
 
-## `DELETE /graph/{graph_id}`
+## `DELETE /api/v1/graph/{graph_id}`
 
 Delete graph.
 
 Response `204` (empty body)
 
-## `POST /graph/{graph_id}/node/upsert`
+## `POST /api/v1/graph/{graph_id}/node/upsert`
 
 Create/update one node.
 
@@ -234,7 +235,7 @@ Request:
 
 Response `200`: updated `DirectedGraph`
 
-## `POST /graph/{graph_id}/node/remove`
+## `POST /api/v1/graph/{graph_id}/node/remove`
 
 Remove one node and incident edges.
 
@@ -253,7 +254,7 @@ Notes:
 
 - Cannot remove the final remaining node.
 
-## `POST /graph/{graph_id}/node/reparent`
+## `POST /api/v1/graph/{graph_id}/node/reparent`
 
 Atomic parent-link mutation for tree/subtask flows.
 
@@ -277,7 +278,7 @@ Notes:
 - `metadata` is only valid when `newParentNodeId` is non-null.
 - Tree detach can still fail if final state violates rooted/connected invariants.
 
-## `POST /graph/{graph_id}/edge/add`
+## `POST /api/v1/graph/{graph_id}/edge/add`
 
 Add one edge.
 
@@ -294,7 +295,7 @@ Request:
 
 Response `200`: updated `DirectedGraph`
 
-## `POST /graph/{graph_id}/edge/remove`
+## `POST /api/v1/graph/{graph_id}/edge/remove`
 
 Remove one edge.
 
@@ -310,7 +311,7 @@ Request:
 
 Response `200`: updated `DirectedGraph`
 
-## `POST /graph/{graph_id}/edge/upsert-metadata`
+## `POST /api/v1/graph/{graph_id}/edge/upsert-metadata`
 
 Set metadata for one edge (creates edge if absent and valid).
 
@@ -327,7 +328,7 @@ Request:
 
 Response `200`: updated `DirectedGraph`
 
-## `GET /graph/{graph_id}/node/by-external-id/{external_id}`
+## `GET /api/v1/graph/{graph_id}/node/by-external-id/{external_id}`
 
 Lookup node by metadata `externalId`.
 
@@ -336,19 +337,19 @@ Response:
 - `200`: `GraphNode`
 - `404`: not found
 
-## `GET /graph/{graph_id}/edge/incident/node/{node_id}`
+## `GET /api/v1/graph/{graph_id}/edge/incident/node/{node_id}`
 
 List incident edges for node.
 
 Response `200`: `GraphEdge[]`
 
-## `GET /graph/{graph_id}/edge/incident/external-id/{external_id}`
+## `GET /api/v1/graph/{graph_id}/edge/incident/external-id/{external_id}`
 
 List incident edges by node external ID.
 
 Response `200`: `GraphEdge[]` (empty array if node not found)
 
-## `POST /graph/{graph_id}/nodes/query-metadata`
+## `POST /api/v1/graph/{graph_id}/nodes/query-metadata`
 
 Filter nodes by JSON containment.
 
@@ -360,7 +361,7 @@ Request:
 
 Response `200`: `GraphNode[]`
 
-## `POST /graph/{graph_id}/edges/query-metadata`
+## `POST /api/v1/graph/{graph_id}/edges/query-metadata`
 
 Filter edges by JSON containment.
 
@@ -372,7 +373,7 @@ Request:
 
 Response `200`: `GraphEdge[]`
 
-## `POST /graph/validate`
+## `POST /api/v1/graph/validate`
 
 Validate candidate graph content without writing.
 
@@ -401,7 +402,7 @@ Response `200`:
 
 Violation fields use `snake_case`.
 
-## `POST /graph/{graph_id}/validate/add-edge`
+## `POST /api/v1/graph/{graph_id}/validate/add-edge`
 
 Preflight check for one add-edge mutation.
 
@@ -425,7 +426,7 @@ Response `200`:
 }
 ```
 
-## `POST /graph/{graph_id}/validate/remove-edge`
+## `POST /api/v1/graph/{graph_id}/validate/remove-edge`
 
 Preflight check for one remove-edge mutation.
 
@@ -440,7 +441,7 @@ Request:
 
 Response `200`: same shape as add-edge preflight.
 
-## `GET /graph/group/{group_id}/permissions`
+## `GET /api/v1/graph/group/{group_id}/permissions`
 
 Read group graph-permission roles.
 
@@ -453,7 +454,7 @@ Response `200`:
 }
 ```
 
-## `PUT /graph/group/{group_id}/permissions`
+## `PUT /api/v1/graph/group/{group_id}/permissions`
 
 Set group graph-permission roles.
 
@@ -513,7 +514,7 @@ function toFlow(graph: DirectedGraph): { nodes: Node[]; edges: Edge[] } {
 
 ## Interaction Strategy
 
-1. Load graph once (`GET /graph/{id}`) and hydrate React Flow state.
+1. Load graph once (`GET /api/v1/graph/{id}`) and hydrate React Flow state.
 2. Use preflight endpoints before committing topology mutations:
    - edge connect: `/validate/add-edge`
    - edge delete: `/validate/remove-edge`

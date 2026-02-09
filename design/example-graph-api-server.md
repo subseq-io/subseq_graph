@@ -15,7 +15,8 @@ full OIDC identity provider.
 1. Reads `DATABASE_URL` from environment (required).
 2. Connects with SQLx and runs graph migrations via `create_graph_tables`.
 3. Serves graph API routes from `subseq_graph::api::routes::<ExampleApp>()`.
-4. Injects an authenticated user via dev auth middleware before handlers run.
+4. Mounts all routes under `/api/v1`.
+5. Injects an authenticated user via dev auth middleware before handlers run.
 
 ## Dev Auth Shim
 
