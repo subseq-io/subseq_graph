@@ -16,7 +16,8 @@ full OIDC identity provider.
 2. Connects with SQLx and runs graph migrations via `create_graph_tables`.
 3. Serves graph API routes from `subseq_graph::api::routes::<ExampleApp>()`.
 4. Mounts all routes under `/api/v1`.
-5. Injects an authenticated user via dev auth middleware before handlers run.
+5. Keeps `/api/v1/healthz` public for probes and applies dev auth middleware to
+   graph and helper routes that require identity.
 
 ## Dev Auth Shim
 

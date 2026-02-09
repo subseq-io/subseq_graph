@@ -15,7 +15,7 @@ example-server usage and `@xyflow/react` integration guidance.
 
 ### Auth
 
-All routes require an authenticated user.
+All routes require an authenticated user except `GET /api/v1/healthz`.
 
 - Production: standard auth middleware / bearer flow.
 - Example server (`examples/graph_api_server.rs`):

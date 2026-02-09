@@ -22,7 +22,13 @@ use subseq_auth::prelude::{
 use subseq_graph::api::{GraphApp, HasPool};
 use uuid::Uuid;
 
-const DEV_ID_TOKEN: &str = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDAifQ.c2ln";
+const DEV_ID_TOKEN: &str = concat!(
+    "eyJhbGciOiJSUzI1NiJ9.",
+    "eyJpc3MiOiJodHRwczovL3NlcnZlci5leGFtcGxlLmNvbSIsImF1ZCI6WyJzNkJoZ",
+    "FJrcXQzIl0sImV4cCI6MTMxMTI4MTk3MCwiaWF0IjoxMzExMjgwOTcwLCJzdWIiOi",
+    "IyNDQwMDMyMCIsInRmYV9tZXRob2QiOiJ1MmYifQ.",
+    "aW52YWxpZF9zaWduYXR1cmU"
+);
 
 #[derive(Clone)]
 struct DevAuthConfig {
@@ -127,17 +133,21 @@ async fn main() -> anyhow::Result<()> {
         auth,
     };
 
-    let api_v1 = Router::new()
-        .route("/healthz", get(health_handler))
+    let public_api_v1 = Router::new().route("/healthz", get(health_handler));
+
+    let protected_api_v1 = Router::new()
         .route("/example/whoami", get(whoami_handler))
         .merge(subseq_graph::api::routes::<ExampleApp>());
 
     let app = Router::new()
-        .nest("/api/v1", api_v1)
-        .layer(from_fn_with_state(
-            app_state.clone(),
-            dev_identity_middleware,
-        ))
+        .nest("/api/v1", public_api_v1)
+        .nest(
+            "/api/v1",
+            protected_api_v1.layer(from_fn_with_state(
+                app_state.clone(),
+                dev_identity_middleware,
+            )),
+        )
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(bind_addr)
