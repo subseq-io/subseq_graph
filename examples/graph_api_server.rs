@@ -14,7 +14,7 @@ use chrono::Utc;
 use serde_json::json;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
-use subseq_auth::db::create_user_tables;
+use subseq_auth::db::{UserRow, create_user_tables};
 use subseq_auth::prelude::{
     AuthenticatedUser, ClaimsVerificationError, CoreIdToken, CoreIdTokenClaims, OidcToken, UserId,
     ValidatesIdentity,
@@ -209,6 +209,14 @@ async fn dev_identity_middleware(
         Err(message) => return json_error(StatusCode::BAD_REQUEST, "invalid_dev_auth", &message),
     };
 
+    if let Err(message) = ensure_dev_user(app.pool.as_ref(), user_id, &username, &email).await {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "dev_user_provision_failed",
+            &message,
+        );
+    }
+
     req.extensions_mut().insert(auth_user);
     next.run(req).await
 }
@@ -267,6 +275,26 @@ async fn build_auth_user(
     AuthenticatedUser::from_claims(token, claims)
         .await
         .map_err(|err| format!("invalid dev auth user: {}", err))
+}
+
+async fn ensure_dev_user(
+    pool: &PgPool,
+    user_id: UserId,
+    username: &str,
+    email: &str,
+) -> Result<(), String> {
+    if UserRow::get(pool, user_id)
+        .await
+        .map_err(|err| format!("failed to query auth user row: {}", err))?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let user = UserRow::new(user_id, Some(username.to_string()), email.to_string(), None);
+    UserRow::insert(pool, &user)
+        .await
+        .map_err(|err| format!("failed to insert auth user row: {}", err))
 }
 
 fn json_error(status: StatusCode, code: &'static str, message: &str) -> Response {

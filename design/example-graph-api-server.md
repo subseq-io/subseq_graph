@@ -18,6 +18,8 @@ full OIDC identity provider.
 4. Mounts all routes under `/api/v1`.
 5. Keeps `/api/v1/healthz` public for probes and applies dev auth middleware to
    graph and helper routes that require identity.
+6. Auto-provisions `auth.users` rows for dev-auth identities (default user and
+   any `x-dev-user-id` override) so graph writes do not fail on auth FK checks.
 
 ## Dev Auth Shim
 

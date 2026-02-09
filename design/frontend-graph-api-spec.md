@@ -23,6 +23,7 @@ All routes require an authenticated user except `GET /api/v1/healthz`.
   - `x-dev-email` (optional)
   - `x-dev-username` (optional)
   - `GRAPH_EXAMPLE_REQUIRE_DEV_HEADER=true` to force `x-dev-user-id`.
+  - The server auto-provisions `auth.users` for dev identities used by requests.
 
 ## 2) Response And Error Contract
 
