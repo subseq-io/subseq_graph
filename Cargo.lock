@@ -2858,6 +2858,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "subseq_auth",
+ "tokio",
  "tracing",
  "uuid",
 ]
