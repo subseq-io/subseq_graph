@@ -51,6 +51,5 @@ pub mod prelude {
         graph_role_scope_id_for_group, graph_role_scope_id_global, graph_update_access_roles,
         graph_update_role,
     };
-    pub use subseq_auth::group_id::GroupId;
-    pub use subseq_auth::user_id::UserId;
+    pub use subseq_auth::prelude::{GroupId, UserId};
 }

@@ -7,8 +7,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use subseq_auth::group_id::GroupId;
-use subseq_auth::user_id::UserId;
+use subseq_auth::prelude::{GroupId, UserId};
 
 use crate::db;
 use crate::error::{LibError, Result};

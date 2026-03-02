@@ -7,8 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
-use subseq_auth::group_id::GroupId;
-use subseq_auth::prelude::{AuthenticatedUser, ValidatesIdentity, structured_error_response};
+use subseq_auth::prelude::{AuthenticatedUser, GroupId, ValidatesIdentity, structured_error_response};
 
 use crate::db;
 use crate::error::{ErrorKind, LibError};

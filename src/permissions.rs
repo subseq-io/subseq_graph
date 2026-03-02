@@ -1,4 +1,4 @@
-use subseq_auth::group_id::GroupId;
+use subseq_auth::prelude::GroupId;
 
 /// Scope used for graph permission grants in `auth.user_roles` and `auth.group_roles`.
 pub const GRAPH_ROLE_SCOPE: &str = "graph";

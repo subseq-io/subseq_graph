@@ -1,16 +1,14 @@
 use std::collections::HashSet;
-use std::fmt;
-use std::str::FromStr;
 
 use anyhow::anyhow;
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use subseq_auth::group_id::GroupId;
-use subseq_auth::user_id::UserId;
+use subseq_auth::prelude::{GroupId, UserId};
+use subseq_util::uuid_id_type;
 use uuid::Uuid;
 
-use crate::error::{LibError, Result};
+use crate::error::{LibError, Result as LibResult};
 use crate::invariants;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -41,51 +39,8 @@ impl GraphKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub struct GraphId(pub Uuid);
-
-impl fmt::Display for GraphId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl FromStr for GraphId {
-    type Err = uuid::Error;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        Uuid::from_str(s).map(Self)
-    }
-}
-
-impl From<Uuid> for GraphId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub struct GraphNodeId(pub Uuid);
-
-impl fmt::Display for GraphNodeId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl FromStr for GraphNodeId {
-    type Err = uuid::Error;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        Uuid::from_str(s).map(Self)
-    }
-}
-
-impl From<Uuid> for GraphNodeId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
+uuid_id_type!(GraphId, "graph");
+uuid_id_type!(GraphNodeId, "node");
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApiMetadata(pub Map<String, Value>);
@@ -102,7 +57,7 @@ enum MetadataKeyCase {
 impl TryFrom<Value> for ApiMetadata {
     type Error = LibError;
 
-    fn try_from(value: Value) -> Result<Self> {
+    fn try_from(value: Value) -> LibResult<Self> {
         let normalized = canonicalize_metadata_value(value, MetadataKeyCase::Camel, "$")?;
         match normalized {
             Value::Object(map) => Ok(Self(map)),
@@ -117,7 +72,7 @@ impl TryFrom<Value> for ApiMetadata {
 impl TryFrom<Value> for DbMetadata {
     type Error = LibError;
 
-    fn try_from(value: Value) -> Result<Self> {
+    fn try_from(value: Value) -> LibResult<Self> {
         let normalized = canonicalize_metadata_value(value, MetadataKeyCase::Snake, "$")?;
         match normalized {
             Value::Object(map) => Ok(Self(map)),
@@ -165,25 +120,29 @@ impl From<DbMetadata> for Value {
     }
 }
 
-pub fn normalize_api_metadata(metadata: Option<Value>) -> Result<Value> {
+pub fn normalize_api_metadata(metadata: Option<Value>) -> LibResult<Value> {
     let input = metadata.unwrap_or_else(|| Value::Object(Map::new()));
     let api_metadata = ApiMetadata::try_from(input)?;
     Ok(Value::from(api_metadata))
 }
 
-pub fn api_metadata_to_db_json(metadata: &Value) -> Result<Value> {
+pub fn api_metadata_to_db_json(metadata: &Value) -> LibResult<Value> {
     let api_metadata = ApiMetadata::try_from(metadata.clone())?;
     let db_metadata = DbMetadata::from(api_metadata);
     Ok(Value::from(db_metadata))
 }
 
-pub fn db_metadata_to_api_json(metadata: &Value) -> Result<Value> {
+pub fn db_metadata_to_api_json(metadata: &Value) -> LibResult<Value> {
     let db_metadata = DbMetadata::try_from(metadata.clone())?;
     let api_metadata = ApiMetadata::from(db_metadata);
     Ok(Value::from(api_metadata))
 }
 
-fn canonicalize_metadata_value(value: Value, case: MetadataKeyCase, path: &str) -> Result<Value> {
+fn canonicalize_metadata_value(
+    value: Value,
+    case: MetadataKeyCase,
+    path: &str,
+) -> LibResult<Value> {
     match value {
         Value::Object(map) => {
             let mut normalized = Map::with_capacity(map.len());
@@ -676,7 +635,7 @@ impl ListGraphsQuery {
 }
 
 impl CreateGraphPayload {
-    pub fn normalize(self) -> Result<GraphDefinition> {
+    pub fn normalize(self) -> LibResult<GraphDefinition> {
         normalize_graph_definition(
             self.kind,
             self.name,
@@ -690,7 +649,7 @@ impl CreateGraphPayload {
 }
 
 impl UpdateGraphPayload {
-    pub fn normalize(self) -> Result<GraphDefinition> {
+    pub fn normalize(self) -> LibResult<GraphDefinition> {
         normalize_graph_definition(
             self.kind,
             self.name,
@@ -704,7 +663,7 @@ impl UpdateGraphPayload {
 }
 
 impl ValidateGraphEdgesPayload {
-    pub fn normalize(self) -> Result<GraphInvariantInput> {
+    pub fn normalize(self) -> LibResult<GraphInvariantInput> {
         let nodes = normalize_nodes(self.nodes, false)?;
         let edges = normalize_validation_edges(self.edges)?;
 
@@ -724,7 +683,7 @@ fn normalize_graph_definition(
     owner_group_id: Option<GroupId>,
     nodes: Vec<NewGraphNode>,
     edges: Vec<NewGraphEdge>,
-) -> Result<GraphDefinition> {
+) -> LibResult<GraphDefinition> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err(LibError::invalid(
@@ -748,7 +707,7 @@ fn normalize_graph_definition(
     })
 }
 
-fn normalize_nodes(nodes: Vec<NewGraphNode>, require_non_empty: bool) -> Result<Vec<GraphNode>> {
+fn normalize_nodes(nodes: Vec<NewGraphNode>, require_non_empty: bool) -> LibResult<Vec<GraphNode>> {
     if require_non_empty && nodes.is_empty() {
         return Err(LibError::invalid(
             "At least one node is required",
@@ -785,7 +744,10 @@ fn normalize_nodes(nodes: Vec<NewGraphNode>, require_non_empty: bool) -> Result<
     Ok(output_nodes)
 }
 
-fn normalize_write_edges(edges: Vec<NewGraphEdge>, nodes: &[GraphNode]) -> Result<Vec<GraphEdge>> {
+fn normalize_write_edges(
+    edges: Vec<NewGraphEdge>,
+    nodes: &[GraphNode],
+) -> LibResult<Vec<GraphEdge>> {
     let node_ids: HashSet<GraphNodeId> = nodes.iter().map(|node| node.id).collect();
     let mut seen_edges = HashSet::with_capacity(edges.len());
     let mut output_edges = Vec::with_capacity(edges.len());
@@ -818,10 +780,10 @@ fn normalize_write_edges(edges: Vec<NewGraphEdge>, nodes: &[GraphNode]) -> Resul
     Ok(output_edges)
 }
 
-fn normalize_validation_edges(edges: Vec<NewGraphEdge>) -> Result<Vec<GraphEdge>> {
+fn normalize_validation_edges(edges: Vec<NewGraphEdge>) -> LibResult<Vec<GraphEdge>> {
     edges
         .into_iter()
-        .map(|edge| -> Result<GraphEdge> {
+        .map(|edge| -> LibResult<GraphEdge> {
             let metadata = normalize_api_metadata(edge.metadata)?;
             Ok(GraphEdge {
                 from_node_id: edge.from_node_id,
