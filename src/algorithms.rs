@@ -87,7 +87,7 @@ pub fn topological_sort(graph: &DirectedGraph) -> Vec<&GraphNode> {
 mod tests {
     use chrono::Utc;
     use serde_json::json;
-    use subseq_auth::user_id::UserId;
+    use subseq_auth::prelude::UserId;
 
     use crate::models::{DirectedGraph, GraphEdge, GraphId, GraphKind, GraphNode, GraphNodeId};
 

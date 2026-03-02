@@ -16,7 +16,7 @@ use crate::models::{
     GraphSummary, GroupGraphPermissions, GuardedUpdateGraphPayload, ListGraphsQuery,
     MetadataFilterPayload, NewGraphEdge, NewGraphNode, Paged, RemoveEdgePayload, RemoveNodePayload,
     ReparentNodePayload, UpdateGraphPayload, UpdateGroupGraphPermissionsPayload,
-    UpsertEdgeMetadataPayload, UpsertNodePayload,
+    UpsertEdgeMetadataPayload, UpsertNodePayload, deserialize_typed_uuid,
 };
 use crate::permissions;
 
@@ -31,67 +31,84 @@ pub enum GraphOperation {
         payload: CreateGraphPayload,
     },
     Extend {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         graph_id: GraphId,
         payload: ExtendGraphPayload,
     },
     Replace {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         graph_id: GraphId,
         payload: UpdateGraphPayload,
     },
     ReplaceGuarded {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         graph_id: GraphId,
         payload: GuardedUpdateGraphPayload,
     },
     Get {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         graph_id: GraphId,
     },
     List {
         query: ListGraphsQuery,
     },
     Delete {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         graph_id: GraphId,
     },
     AddEdge {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         graph_id: GraphId,
         payload: AddEdgePayload,
     },
     RemoveEdge {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         graph_id: GraphId,
         payload: RemoveEdgePayload,
     },
     UpsertEdgeMetadata {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         graph_id: GraphId,
         payload: UpsertEdgeMetadataPayload,
     },
     UpsertNode {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         graph_id: GraphId,
         payload: UpsertNodePayload,
     },
     RemoveNode {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         graph_id: GraphId,
         payload: RemoveNodePayload,
     },
     ReparentNode {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         graph_id: GraphId,
         payload: ReparentNodePayload,
     },
     FindNodeByExternalId {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         graph_id: GraphId,
         external_id: String,
     },
     QueryNodesByMetadata {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         graph_id: GraphId,
         payload: MetadataFilterPayload,
     },
     QueryEdgesByMetadata {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         graph_id: GraphId,
         payload: MetadataFilterPayload,
     },
     IncidentEdgesForNode {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         graph_id: GraphId,
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         node_id: GraphNodeId,
     },
     IncidentEdgesForExternalId {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         graph_id: GraphId,
         external_id: String,
     },
@@ -868,5 +885,25 @@ mod tests {
             .normalize()
             .expect_err("dag back-edge should fail invariant checks");
         assert_eq!(err.code, "graph_dag_cycle");
+    }
+
+    #[test]
+    fn graph_operation_accepts_typed_uuid_ids() {
+        let graph_uuid = Uuid::new_v4();
+        let node_uuid = Uuid::new_v4();
+        let operation: GraphOperation = serde_json::from_value(json!({
+            "operation": "incident_edges_for_node",
+            "graph_id": format!("graph_{}", graph_uuid.simple()),
+            "node_id": format!("node_{}", node_uuid.simple())
+        }))
+        .expect("typed operation payload should deserialize");
+
+        match operation {
+            GraphOperation::IncidentEdgesForNode { graph_id, node_id } => {
+                assert_eq!(graph_id, GraphId(graph_uuid));
+                assert_eq!(node_id, GraphNodeId(node_uuid));
+            }
+            _ => panic!("expected incident_edges_for_node operation"),
+        }
     }
 }

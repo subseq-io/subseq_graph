@@ -5,6 +5,7 @@ use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use subseq_auth::prelude::{GroupId, UserId};
+use subseq_util::typed_uuid::{FromTypedUuid, TypedUuid};
 use subseq_util::uuid_id_type;
 use uuid::Uuid;
 
@@ -41,6 +42,26 @@ impl GraphKind {
 
 uuid_id_type!(GraphId, "graph");
 uuid_id_type!(GraphNodeId, "node");
+
+pub(crate) fn deserialize_typed_uuid<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: FromTypedUuid,
+{
+    let value = TypedUuid::<T>::deserialize(deserializer)?;
+    Ok(T::from_typed_uuid(value))
+}
+
+pub(crate) fn deserialize_optional_typed_uuid<'de, D, T>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: FromTypedUuid,
+{
+    let value = Option::<TypedUuid<T>>::deserialize(deserializer)?;
+    Ok(value.map(T::from_typed_uuid))
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApiMetadata(pub Map<String, Value>);
@@ -377,7 +398,9 @@ pub struct ValidateGraphEdgesResponse {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EdgeMutationPayload {
+    #[serde(deserialize_with = "deserialize_typed_uuid")]
     pub from_node_id: GraphNodeId,
+    #[serde(deserialize_with = "deserialize_typed_uuid")]
     pub to_node_id: GraphNodeId,
 }
 
@@ -393,6 +416,7 @@ pub struct EdgeMutationCheckResponse {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpsertNodePayload {
+    #[serde(default, deserialize_with = "deserialize_optional_typed_uuid")]
     pub node_id: Option<GraphNodeId>,
     pub label: String,
     pub metadata: Option<Value>,
@@ -403,6 +427,7 @@ pub struct UpsertNodePayload {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoveNodePayload {
+    #[serde(deserialize_with = "deserialize_typed_uuid")]
     pub node_id: GraphNodeId,
     #[serde(default)]
     pub expected_updated_at: Option<NaiveDateTime>,
@@ -411,8 +436,9 @@ pub struct RemoveNodePayload {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReparentNodePayload {
+    #[serde(deserialize_with = "deserialize_typed_uuid")]
     pub node_id: GraphNodeId,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_typed_uuid")]
     pub new_parent_node_id: Option<GraphNodeId>,
     #[serde(default)]
     pub metadata: Option<Value>,
@@ -423,7 +449,9 @@ pub struct ReparentNodePayload {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddEdgePayload {
+    #[serde(deserialize_with = "deserialize_typed_uuid")]
     pub from_node_id: GraphNodeId,
+    #[serde(deserialize_with = "deserialize_typed_uuid")]
     pub to_node_id: GraphNodeId,
     pub metadata: Option<Value>,
     #[serde(default)]
@@ -433,7 +461,9 @@ pub struct AddEdgePayload {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoveEdgePayload {
+    #[serde(deserialize_with = "deserialize_typed_uuid")]
     pub from_node_id: GraphNodeId,
+    #[serde(deserialize_with = "deserialize_typed_uuid")]
     pub to_node_id: GraphNodeId,
     #[serde(default)]
     pub expected_updated_at: Option<NaiveDateTime>,
@@ -442,7 +472,9 @@ pub struct RemoveEdgePayload {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpsertEdgeMetadataPayload {
+    #[serde(deserialize_with = "deserialize_typed_uuid")]
     pub from_node_id: GraphNodeId,
+    #[serde(deserialize_with = "deserialize_typed_uuid")]
     pub to_node_id: GraphNodeId,
     pub metadata: Value,
     #[serde(default)]
@@ -467,30 +499,40 @@ pub struct GuardedUpdateGraphPayload {
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum GraphDeltaOperation {
     AddEdge {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         from_node_id: GraphNodeId,
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         to_node_id: GraphNodeId,
         metadata: Option<Value>,
     },
     RemoveEdge {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         from_node_id: GraphNodeId,
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         to_node_id: GraphNodeId,
     },
     UpsertEdgeMetadata {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         from_node_id: GraphNodeId,
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         to_node_id: GraphNodeId,
         metadata: Value,
     },
     UpsertNode {
+        #[serde(default, deserialize_with = "deserialize_optional_typed_uuid")]
         node_id: Option<GraphNodeId>,
         label: String,
         metadata: Option<Value>,
     },
     ReparentNode {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         node_id: GraphNodeId,
+        #[serde(default, deserialize_with = "deserialize_optional_typed_uuid")]
         new_parent_node_id: Option<GraphNodeId>,
         metadata: Option<Value>,
     },
     RemoveNode {
+        #[serde(deserialize_with = "deserialize_typed_uuid")]
         node_id: GraphNodeId,
     },
 }
@@ -498,6 +540,7 @@ pub enum GraphDeltaOperation {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphDeltaCommand {
+    #[serde(deserialize_with = "deserialize_typed_uuid")]
     pub graph_id: GraphId,
     #[serde(flatten)]
     pub operation: GraphDeltaOperation,
@@ -558,6 +601,7 @@ pub struct Paged<T> {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewGraphNode {
+    #[serde(default, deserialize_with = "deserialize_optional_typed_uuid")]
     pub id: Option<GraphNodeId>,
     pub label: String,
     pub metadata: Option<Value>,
@@ -566,7 +610,9 @@ pub struct NewGraphNode {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewGraphEdge {
+    #[serde(deserialize_with = "deserialize_typed_uuid")]
     pub from_node_id: GraphNodeId,
+    #[serde(deserialize_with = "deserialize_typed_uuid")]
     pub to_node_id: GraphNodeId,
     pub metadata: Option<Value>,
 }
@@ -797,12 +843,22 @@ fn normalize_validation_edges(edges: Vec<NewGraphEdge>) -> LibResult<Vec<GraphEd
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use uuid::Uuid;
 
     use super::{
-        CreateGraphPayload, GraphInvariantViolation, GraphKind, GraphNodeId, NewGraphEdge,
-        NewGraphNode, UpdateGraphPayload, ValidateGraphEdgesPayload, api_metadata_to_db_json,
+        CreateGraphPayload, GraphDeltaCommand, GraphDeltaOperation, GraphId,
+        GraphInvariantViolation, GraphKind, GraphNodeId, NewGraphEdge, NewGraphNode,
+        UpdateGraphPayload, ValidateGraphEdgesPayload, api_metadata_to_db_json,
         db_metadata_to_api_json, normalize_api_metadata,
     };
+
+    fn typed_graph_id(uuid: Uuid) -> String {
+        format!("graph_{}", uuid.simple())
+    }
+
+    fn typed_node_id(uuid: Uuid) -> String {
+        format!("node_{}", uuid.simple())
+    }
 
     #[test]
     fn normalize_api_metadata_converts_nested_keys_to_camel_case() {
@@ -1071,5 +1127,104 @@ mod tests {
                 missing_node_id
             } if *from_node_id == node_a && *to_node_id == missing && *missing_node_id == missing
         ));
+    }
+
+    #[test]
+    fn create_payload_accepts_typed_uuid_node_ids() {
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let payload: CreateGraphPayload = serde_json::from_value(json!({
+            "kind": "directed",
+            "name": "Typed IDs",
+            "description": null,
+            "metadata": null,
+            "ownerGroupId": null,
+            "nodes": [
+                {
+                    "id": typed_node_id(source_id),
+                    "label": "source",
+                    "metadata": null
+                },
+                {
+                    "id": typed_node_id(target_id),
+                    "label": "target",
+                    "metadata": null
+                }
+            ],
+            "edges": [
+                {
+                    "fromNodeId": typed_node_id(source_id),
+                    "toNodeId": typed_node_id(target_id),
+                    "metadata": null
+                }
+            ]
+        }))
+        .expect("typed payload should deserialize");
+
+        assert_eq!(payload.nodes[0].id, Some(GraphNodeId(source_id)));
+        assert_eq!(payload.edges[0].from_node_id, GraphNodeId(source_id));
+        assert_eq!(payload.edges[0].to_node_id, GraphNodeId(target_id));
+    }
+
+    #[test]
+    fn graph_delta_command_accepts_typed_uuid_ids() {
+        let graph_id = Uuid::new_v4();
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let command: GraphDeltaCommand = serde_json::from_value(json!({
+            "graphId": typed_graph_id(graph_id),
+            "operation": "add_edge",
+            "from_node_id": typed_node_id(source_id),
+            "to_node_id": typed_node_id(target_id),
+            "metadata": null
+        }))
+        .expect("typed graph delta command should deserialize");
+
+        assert_eq!(command.graph_id, GraphId(graph_id));
+        match command.operation {
+            GraphDeltaOperation::AddEdge {
+                from_node_id,
+                to_node_id,
+                metadata,
+            } => {
+                assert_eq!(from_node_id, GraphNodeId(source_id));
+                assert_eq!(to_node_id, GraphNodeId(target_id));
+                assert_eq!(metadata, None);
+            }
+            _ => panic!("expected add_edge operation"),
+        }
+    }
+
+    #[test]
+    fn validate_payload_accepts_typed_uuid_node_ids() {
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let payload: ValidateGraphEdgesPayload = serde_json::from_value(json!({
+            "kind": "directed",
+            "nodes": [
+                {
+                    "id": typed_node_id(source_id),
+                    "label": "source",
+                    "metadata": null
+                },
+                {
+                    "id": typed_node_id(target_id),
+                    "label": "target",
+                    "metadata": null
+                }
+            ],
+            "edges": [
+                {
+                    "fromNodeId": typed_node_id(source_id),
+                    "toNodeId": typed_node_id(target_id),
+                    "metadata": null
+                }
+            ]
+        }))
+        .expect("typed validation payload should deserialize");
+
+        assert_eq!(payload.nodes[0].id, Some(GraphNodeId(source_id)));
+        assert_eq!(payload.edges[0].from_node_id, GraphNodeId(source_id));
+        assert_eq!(payload.edges[0].to_node_id, GraphNodeId(target_id));
     }
 }
